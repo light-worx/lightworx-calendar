@@ -435,6 +435,7 @@ class GCalView extends ItemView {
   private viewMode: "day" | "week";
   private events: GCalEvent[] = [];
   private loading = false;
+  private hasScrolled = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: GCalTimeblockPlugin) {
     super(leaf);
@@ -515,6 +516,7 @@ class GCalView extends ItemView {
     todayBtn.onclick = () => {
       this.currentDate = new Date();
       this.currentDate.setHours(0, 0, 0, 0);
+      this.hasScrolled = false;
       this.loadAndRender();
     };
 
@@ -554,6 +556,7 @@ class GCalView extends ItemView {
     } else {
       this.currentDate.setDate(this.currentDate.getDate() + dir * 7);
     }
+    this.hasScrolled = false;
     this.loadAndRender();
   }
 
@@ -639,11 +642,14 @@ class GCalView extends ItemView {
       }
     }
 
-    // Scroll to current time
-    setTimeout(() => {
-      const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
-      scrollWrap.scrollTop = scrollTo;
-    }, 50);
+    // Scroll to current time on first load only
+    if (!this.hasScrolled) {
+      setTimeout(() => {
+        const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
+        scrollWrap.scrollTop = scrollTo;
+        this.hasScrolled = true;
+      }, 50);
+    }
   }
 
   // ── Week view ─────────────────────────────────────────────────────────────────
@@ -745,11 +751,14 @@ class GCalView extends ItemView {
       }
     });
 
-    setTimeout(() => {
-      const now = new Date();
-      const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
-      scrollWrap.scrollTop = scrollTo;
-    }, 50);
+    if (!this.hasScrolled) {
+      setTimeout(() => {
+        const now = new Date();
+        const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
+        scrollWrap.scrollTop = scrollTo;
+        this.hasScrolled = true;
+      }, 50);
+    }
   }
 
   // ── Event positioning ─────────────────────────────────────────────────────────
