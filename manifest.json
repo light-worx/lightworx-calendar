@@ -1,11 +1,10 @@
 {
-  "id": "gcal-timeblock",
-  "name": "GCal Timeblock",
-  "version": "1.0.0",
-  "minAppVersion": "0.15.0",
-  "description": "View and manage Google Calendar events in a day/week timeblock planner side panel.",
-  "author": "You",
-  "authorUrl": "",
-  "fundingUrl": "",
-  "isDesktopOnly": false
+	"id": "lightworx-calendar",
+	"name": "Lightworx calendar",
+	"version": "0.0.1",
+	"minAppVersion": "0.15.0",
+	"description": "Lightworx calendar",
+	"author": "Michael Bishop",
+	"authorUrl": "https://lightworx.co.za",
+	"isDesktopOnly": false
 }
