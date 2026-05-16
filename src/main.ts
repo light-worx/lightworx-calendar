@@ -195,6 +195,11 @@ function localStringToDate(s: string): Date {
   return new Date(year, month - 1, day, hour, minute, 0, 0);
 }
 
+/** Returns the IANA timezone name for the current environment, e.g. "Africa/Johannesburg" */
+function localTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
 function dateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
 }
@@ -318,6 +323,10 @@ class EventModal extends Modal {
         new Notice("Please enter a title.");
         return;
       }
+      // Attach local timezone so Google stores the event in the right timezone
+      const tz = localTimeZone();
+      if (this.event.start?.dateTime) this.event.start.timeZone = tz;
+      if (this.event.end?.dateTime) this.event.end.timeZone = tz;
       this.onSave(this.event, this.event.calendarId || this.calendars[0]?.id);
       this.close();
     };
@@ -957,23 +966,13 @@ class GCalView extends ItemView {
 
       dragEl = col.createDiv({ cls: "gcal-drag-ghost" });
       dragEl.style.top = `${minsToTop(dragStartMins)}px`;
-      dragEl.style.height = `${HOUR_HEIGHT}px`;
+      dragEl.style.height = `${minsToTop(60)}px`; // start at 1hr
 
-      // Top edge line + start time label
-      const topEdge = dragEl.createDiv({ cls: "gcal-drag-edge gcal-drag-edge-top" });
-      topEdge.createDiv({ cls: "gcal-drag-edge-line" });
-      const topLabel = topEdge.createEl("span", { cls: "gcal-drag-time-label" });
-
-      // Content area: title
-      dragEl.createEl("span", { cls: "gcal-drag-label", text: "New event" });
-
-      // Duration pill in the middle
-      const durationPill = dragEl.createEl("span", { cls: "gcal-drag-duration" });
-
-      // Bottom edge line + end time label
-      const bottomEdge = dragEl.createDiv({ cls: "gcal-drag-edge gcal-drag-edge-bottom" });
-      const bottomLabel = bottomEdge.createEl("span", { cls: "gcal-drag-time-label" });
-      bottomEdge.createDiv({ cls: "gcal-drag-edge-line" });
+      // Time labels rendered as siblings in the column, not children of ghost
+      const startLabel = col.createDiv({ cls: "gcal-drag-start-label" });
+      const endLabel = col.createDiv({ cls: "gcal-drag-end-label" });
+      const durationPill = dragEl.createDiv({ cls: "gcal-drag-duration" });
+      dragEl.createDiv({ cls: "gcal-drag-title", text: "New event" });
 
       const fmt = (h: number, m: number) => {
         const ampm = h < 12 ? "AM" : "PM";
@@ -984,15 +983,22 @@ class GCalView extends ItemView {
       const updateGhost = (currentMins: number) => {
         const startMins = Math.min(dragStartMins, currentMins);
         const endMins = Math.max(dragStartMins + 15, currentMins);
-        dragEl!.style.top = `${minsToTop(startMins)}px`;
-        dragEl!.style.height = `${minsToTop(endMins - startMins)}px`;
+        const topPx = minsToTop(startMins);
+        const heightPx = minsToTop(endMins - startMins);
+
+        dragEl!.style.top = `${topPx}px`;
+        dragEl!.style.height = `${heightPx}px`;
 
         const sH = startHour + Math.floor(startMins / 60);
         const sM = startMins % 60;
         const eH = startHour + Math.floor(endMins / 60);
         const eM = endMins % 60;
-        topLabel.setText(fmt(sH, sM));
-        bottomLabel.setText(fmt(eH, eM));
+
+        // Position labels just outside the ghost edges
+        startLabel.style.top = `${topPx - 14}px`;
+        startLabel.setText(fmt(sH, sM));
+        endLabel.style.top = `${topPx + heightPx + 2}px`;
+        endLabel.setText(fmt(eH, eM));
 
         const durMins = endMins - startMins;
         const durH = Math.floor(durMins / 60);
@@ -1001,8 +1007,6 @@ class GCalView extends ItemView {
           durH > 0 && durM > 0 ? `${durH}h ${durM}m` :
           durH > 0 ? `${durH}h` : `${durM}m`
         );
-        // Hide duration pill if block is too short to show it
-        durationPill.style.display = minsToTop(durMins) < 36 ? "none" : "";
       };
 
       updateGhost(dragStartMins + 60); // initialise at 1 hour
@@ -1019,6 +1023,8 @@ class GCalView extends ItemView {
         if (!dragEl) return;
         dragEl.remove();
         dragEl = null;
+        startLabel.remove();
+        endLabel.remove();
 
         const currentMins = yToMins(me.clientY);
         const startMins = Math.min(dragStartMins, currentMins);
@@ -1026,6 +1032,8 @@ class GCalView extends ItemView {
 
         // If barely moved (< 5px), treat as a plain click → full modal
         if (Math.abs(me.clientY - dragStartY) < 5) {
+          startLabel.remove();
+          endLabel.remove();
           const start = new Date(day);
           start.setHours(startHour + Math.floor(startMins / 60), startMins % 60, 0, 0);
           const end = new Date(start.getTime() + 60 * 60 * 1000);
@@ -1046,13 +1054,14 @@ class GCalView extends ItemView {
 
           const calColor =
             this.plugin.settings.calendars.find((c) => c.id === defaultCalId)?.color || "#4285F4";
+          const tz = localTimeZone();
 
           if (openFull) {
             // Pre-fill and open the full event modal
             const stub: Partial<GCalEvent> = {
               summary: title,
-              start: { dateTime: start.toISOString() },
-              end: { dateTime: end.toISOString() },
+              start: { dateTime: start.toISOString(), timeZone: tz },
+              end: { dateTime: end.toISOString(), timeZone: tz },
               calendarId: defaultCalId,
               calendarColor: calColor,
             };
@@ -1071,8 +1080,8 @@ class GCalView extends ItemView {
               const token = await this.getToken();
               await createEvent(token, defaultCalId, {
                 summary: title,
-                start: { dateTime: start.toISOString() },
-                end: { dateTime: end.toISOString() },
+                start: { dateTime: start.toISOString(), timeZone: tz },
+                end: { dateTime: end.toISOString(), timeZone: tz },
               });
               new Notice("Event created.");
               this.loadAndRender();

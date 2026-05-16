@@ -502,71 +502,49 @@
   left: 2px;
   right: 2px;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+  border: 2px solid var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
   pointer-events: none;
   z-index: 20;
-  min-height: 20px;
+  min-height: 15px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  overflow: visible;
+  padding: 2px 5px;
+  gap: 2px;
 }
 
-.gcal-drag-label {
+.gcal-drag-title {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-normal);
-  padding: 2px 6px;
-  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .gcal-drag-duration {
   font-size: 10px;
   font-weight: 700;
   color: var(--interactive-accent);
-  background: color-mix(in srgb, var(--interactive-accent) 15%, var(--background-primary));
-  border-radius: 8px;
-  padding: 1px 6px;
-  align-self: flex-start;
-  margin: 0 6px 4px;
-  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
-/* Top and bottom edge markers */
-.gcal-drag-edge {
-  display: flex;
-  align-items: center;
+/* Time labels sit as siblings in the day column, outside the ghost box */
+.gcal-drag-start-label,
+.gcal-drag-end-label {
   position: absolute;
-  left: -2px;
-  right: -2px;
-  gap: 4px;
-}
-
-.gcal-drag-edge-top {
-  top: -1px;
-  flex-direction: row; /* line label */
-}
-
-.gcal-drag-edge-bottom {
-  bottom: -1px;
-  flex-direction: row-reverse; /* label line */
-}
-
-.gcal-drag-edge-line {
-  flex: 1;
-  height: 2px;
-  background: var(--interactive-accent);
-  border-radius: 1px;
-}
-
-.gcal-drag-time-label {
+  left: 2px;
   font-size: 10px;
   font-weight: 700;
   color: var(--interactive-accent);
-  white-space: nowrap;
   background: var(--background-primary);
   padding: 0 3px;
   border-radius: 3px;
-  line-height: 1.6;
+  pointer-events: none;
+  z-index: 21;
+  white-space: nowrap;
+  line-height: 14px;
 }
 
 /* ─── Quick Title Modal ───────────────────────────────────────────────────── */
