@@ -495,6 +495,79 @@
   background: color-mix(in srgb, var(--color-red, #e53935) 80%, black);
 }
 
+/* ─── Drag Ghost ──────────────────────────────────────────────────────────── */
+
+.gcal-drag-ghost {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  border-radius: 4px;
+  border-left: 3px solid var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+  pointer-events: none;
+  z-index: 20;
+  min-height: 20px;
+  display: flex;
+  align-items: flex-start;
+  padding: 3px 5px;
+}
+
+.gcal-drag-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-normal);
+  white-space: nowrap;
+}
+
+/* ─── Quick Title Modal ───────────────────────────────────────────────────── */
+
+.gcal-quick-modal {
+  padding: 8px 4px 4px;
+}
+
+.gcal-quick-time {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  letter-spacing: 0.02em;
+}
+
+.gcal-quick-input {
+  width: 100%;
+  font-size: 16px;
+  font-weight: 500;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-sizing: border-box;
+  outline: none;
+}
+
+.gcal-quick-input:focus {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+
+.gcal-quick-hint {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+.gcal-quick-hint kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  font-size: 10px;
+  font-family: var(--font-monospace);
+}
+
 /* ─── Auth Code Section ───────────────────────────────────────────────────── */
 
 .gcal-code-section {

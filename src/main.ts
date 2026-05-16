@@ -47,6 +47,7 @@ interface GCalSettings {
   defaultView: "day" | "week";
   startHour: number;
   endHour: number;
+  defaultCalendarId: string;
 }
 
 const DEFAULT_SETTINGS: GCalSettings = {
@@ -59,6 +60,7 @@ const DEFAULT_SETTINGS: GCalSettings = {
   defaultView: "day",
   startHour: 6,
   endHour: 22,
+  defaultCalendarId: "",
 };
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -325,6 +327,66 @@ class EventModal extends Modal {
   }
 }
 
+// ─── Quick Title Modal ────────────────────────────────────────────────────────
+
+class QuickTitleModal extends Modal {
+  private start: Date;
+  private end: Date;
+  private onConfirm: (title: string, openFull: boolean) => void;
+
+  constructor(
+    app: App,
+    start: Date,
+    end: Date,
+    onConfirm: (title: string, openFull: boolean) => void
+  ) {
+    super(app);
+    this.start = start;
+    this.end = end;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("gcal-quick-modal");
+
+    const fmt = (d: Date) =>
+      d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    contentEl.createEl("div", {
+      cls: "gcal-quick-time",
+      text: `${fmt(this.start)} – ${fmt(this.end)}`,
+    });
+
+    const input = contentEl.createEl("input", {
+      cls: "gcal-quick-input",
+      type: "text",
+      placeholder: "Event title…",
+    });
+    input.focus();
+
+    const hint = contentEl.createEl("div", { cls: "gcal-quick-hint" });
+    hint.innerHTML = `<kbd>Enter</kbd> to save &nbsp;·&nbsp; <kbd>Shift+Enter</kbd> for more options &nbsp;·&nbsp; <kbd>Esc</kbd> to cancel`;
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        const title = input.value.trim();
+        if (!title) return;
+        this.close();
+        this.onConfirm(title, e.shiftKey);
+      }
+      if (e.key === "Escape") {
+        this.close();
+      }
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 // ─── Calendar View ────────────────────────────────────────────────────────────
 
 class GCalView extends ItemView {
@@ -511,20 +573,8 @@ class GCalView extends ItemView {
       }
     }
 
-    // Click-to-create
-    dayCol.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest(".gcal-event")) return;
-      const rect = dayCol.getBoundingClientRect();
-      const relY = e.clientY - rect.top + scrollWrap.scrollTop;
-      const hour = startHour + relY / HOUR_HEIGHT;
-      const h = Math.floor(hour);
-
-      const m = Math.round(((hour - h) * 60) / 15) * 15;
-      const start = new Date(this.currentDate);
-      start.setHours(h, m, 0, 0);
-      const end = new Date(start.getTime() + 60 * 60 * 1000);
-      this.openNewEventModal(start, end);
-    });
+    // Drag-to-create
+    this.attachDragCreate(dayCol, scrollWrap, startHour, this.currentDate);
 
     // Render events
     const positioned = this.positionEvents(timedEvents, startHour, endHour);
@@ -626,19 +676,8 @@ class GCalView extends ItemView {
         }
       }
 
-      // Click to create
-      dayCol.addEventListener("click", (e) => {
-        if ((e.target as HTMLElement).closest(".gcal-event")) return;
-        const rect = dayCol.getBoundingClientRect();
-        const relY = e.clientY - rect.top + scrollWrap.scrollTop;
-        const hour = startHour + relY / HOUR_HEIGHT;
-        const h = Math.floor(hour);
-        const m = Math.round(((hour - h) * 60) / 15) * 15;
-        const start = new Date(day);
-        start.setHours(h, m, 0, 0);
-        const end = new Date(start.getTime() + 60 * 60 * 1000);
-        this.openNewEventModal(start, end);
-      });
+      // Drag-to-create
+      this.attachDragCreate(dayCol, scrollWrap, startHour, day);
 
       const allDayEventsForDay = this.getEventsForDate(day).filter(
         (e) => !!e.start.dateTime
@@ -815,6 +854,11 @@ class GCalView extends ItemView {
       if (e.start.dateTime) {
         return dateKey(new Date(e.start.dateTime)) === key;
       }
+      if (e.start.date && e.end.date) {
+        // All-day: start is inclusive, end is exclusive (Google Calendar convention)
+        // So a multi-day event shows on every day from start up to (but not including) end
+        return key >= e.start.date && key < e.end.date;
+      }
       if (e.start.date) {
         return e.start.date === key;
       }
@@ -874,16 +918,148 @@ class GCalView extends ItemView {
     await this.renderView();
   }
 
+  // ── Drag-to-create ────────────────────────────────────────────────────────────
+
+  attachDragCreate(col: HTMLElement, scrollWrap: HTMLElement, startHour: number, day: Date) {
+    let dragEl: HTMLElement | null = null;
+    let dragStartY = 0;
+    let dragStartMins = 0;
+
+    const yToMins = (clientY: number): number => {
+      const rect = col.getBoundingClientRect();
+      const relY = clientY - rect.top + scrollWrap.scrollTop;
+      const rawMins = (relY / HOUR_HEIGHT) * 60;
+      // Snap to 15-minute slots
+      return Math.round(rawMins / 15) * 15;
+    };
+
+    const minsToTop = (mins: number): number => (mins / 60) * HOUR_HEIGHT;
+
+    col.addEventListener("mousedown", (e) => {
+      if ((e.target as HTMLElement).closest(".gcal-event,.gcal-resize-handle")) return;
+      if (e.button !== 0) return;
+
+      e.preventDefault();
+      dragStartY = e.clientY;
+      dragStartMins = yToMins(e.clientY);
+
+      dragEl = col.createDiv({ cls: "gcal-drag-ghost" });
+      dragEl.style.top = `${minsToTop(dragStartMins)}px`;
+      dragEl.style.height = `${HOUR_HEIGHT}px`; // default 1hr placeholder
+
+      const label = dragEl.createEl("span", { cls: "gcal-drag-label" });
+      label.setText("New event");
+
+      const onMove = (me: MouseEvent) => {
+        if (!dragEl) return;
+        const currentMins = yToMins(me.clientY);
+        const startMins = Math.min(dragStartMins, currentMins);
+        const endMins = Math.max(dragStartMins + 15, currentMins);
+        dragEl.style.top = `${minsToTop(startMins)}px`;
+        dragEl.style.height = `${minsToTop(endMins - startMins)}px`;
+
+        // Live time label
+        const sH = startHour + Math.floor(startMins / 60);
+        const sM = startMins % 60;
+        const eH = startHour + Math.floor(endMins / 60);
+        const eM = endMins % 60;
+        const fmt = (h: number, m: number) => {
+          const ampm = h < 12 ? "AM" : "PM";
+          const h12 = h % 12 || 12;
+          return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
+        };
+        label.setText(`${fmt(sH, sM)} – ${fmt(eH, eM)}`);
+      };
+
+      const onUp = (me: MouseEvent) => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+
+        if (!dragEl) return;
+        dragEl.remove();
+        dragEl = null;
+
+        const currentMins = yToMins(me.clientY);
+        const startMins = Math.min(dragStartMins, currentMins);
+        const endMins = Math.max(dragStartMins + 15, currentMins);
+
+        // If barely moved (< 5px), treat as a plain click → full modal
+        if (Math.abs(me.clientY - dragStartY) < 5) {
+          const start = new Date(day);
+          start.setHours(startHour + Math.floor(startMins / 60), startMins % 60, 0, 0);
+          const end = new Date(start.getTime() + 60 * 60 * 1000);
+          this.openNewEventModal(start, end);
+          return;
+        }
+
+        // Drag completed — show quick-title modal
+        const start = new Date(day);
+        start.setHours(startHour + Math.floor(startMins / 60), startMins % 60, 0, 0);
+        const end = new Date(day);
+        end.setHours(startHour + Math.floor(endMins / 60), endMins % 60, 0, 0);
+
+        new QuickTitleModal(this.app, start, end, async (title, openFull) => {
+          const defaultCalId =
+            this.plugin.settings.defaultCalendarId ||
+            this.plugin.settings.calendars.find((c) => c.enabled)?.id || "";
+
+          const calColor =
+            this.plugin.settings.calendars.find((c) => c.id === defaultCalId)?.color || "#4285F4";
+
+          if (openFull) {
+            // Pre-fill and open the full event modal
+            const stub: Partial<GCalEvent> = {
+              summary: title,
+              start: { dateTime: start.toISOString() },
+              end: { dateTime: end.toISOString() },
+              calendarId: defaultCalId,
+              calendarColor: calColor,
+            };
+            new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
+              try {
+                const token = await this.getToken();
+                await createEvent(token, calId, event);
+                new Notice("Event created.");
+                this.loadAndRender();
+              } catch (err: any) {
+                new Notice("Failed to create event: " + err.message);
+              }
+            }).open();
+          } else {
+            try {
+              const token = await this.getToken();
+              await createEvent(token, defaultCalId, {
+                summary: title,
+                start: { dateTime: start.toISOString() },
+                end: { dateTime: end.toISOString() },
+              });
+              new Notice("Event created.");
+              this.loadAndRender();
+            } catch (err: any) {
+              new Notice("Failed to create event: " + err.message);
+            }
+          }
+        }).open();
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
   // ── Modals ────────────────────────────────────────────────────────────────────
 
   openNewEventModal(start?: Date, end?: Date) {
     const now = start || new Date();
     const later = end || new Date(now.getTime() + 60 * 60 * 1000);
+    const defaultCalId =
+      this.plugin.settings.defaultCalendarId ||
+      this.plugin.settings.calendars.find((c) => c.enabled)?.id;
     const stub: Partial<GCalEvent> = {
       summary: "",
       start: { dateTime: now.toISOString() },
       end: { dateTime: later.toISOString() },
-      calendarId: this.plugin.settings.calendars.find((c) => c.enabled)?.id,
+      calendarId: defaultCalId,
     };
     new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
       try {
@@ -1136,6 +1312,21 @@ class GCalSettingsTab extends PluginSettingTab {
 
     // View settings
     containerEl.createEl("h3", { text: "View" });
+
+    new Setting(containerEl)
+      .setName("Default Calendar")
+      .setDesc("Calendar used when creating events by dragging or via quick-add.")
+      .addDropdown((dd) => {
+        dd.addOption("", "— first enabled calendar —");
+        this.plugin.settings.calendars
+          .filter((c) => c.enabled)
+          .forEach((c) => dd.addOption(c.id, c.name));
+        dd.setValue(this.plugin.settings.defaultCalendarId || "");
+        dd.onChange(async (v) => {
+          this.plugin.settings.defaultCalendarId = v;
+          await this.plugin.saveSettings();
+        });
+      });
 
     new Setting(containerEl)
       .setName("Default View")
