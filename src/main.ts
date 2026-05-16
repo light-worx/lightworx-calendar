@@ -468,7 +468,17 @@ class GCalView extends ItemView {
 
   renderDayView(container: HTMLElement) {
     const { startHour, endHour } = this.plugin.settings;
-    const dayEvents = this.getEventsForDate(this.currentDate);
+    const allEvents = this.getEventsForDate(this.currentDate);
+    const allDayEvents = allEvents.filter((e) => !!e.start.date && !e.start.dateTime);
+    const timedEvents = allEvents.filter((e) => !!e.start.dateTime);
+
+    // All-day strip
+    if (allDayEvents.length > 0) {
+      const allDayRow = container.createDiv({ cls: "gcal-allday-row" });
+      allDayRow.createDiv({ cls: "gcal-allday-gutter", text: "all day" });
+      const allDayCol = allDayRow.createDiv({ cls: "gcal-allday-col" });
+      allDayEvents.forEach((e) => this.renderAllDayEvent(allDayCol, e));
+    }
 
     const scrollWrap = container.createDiv({ cls: "gcal-scroll-wrap" });
     const grid = scrollWrap.createDiv({ cls: "gcal-grid" });
@@ -508,6 +518,7 @@ class GCalView extends ItemView {
       const relY = e.clientY - rect.top + scrollWrap.scrollTop;
       const hour = startHour + relY / HOUR_HEIGHT;
       const h = Math.floor(hour);
+
       const m = Math.round(((hour - h) * 60) / 15) * 15;
       const start = new Date(this.currentDate);
       start.setHours(h, m, 0, 0);
@@ -516,7 +527,7 @@ class GCalView extends ItemView {
     });
 
     // Render events
-    const positioned = this.positionEvents(dayEvents, startHour, endHour);
+    const positioned = this.positionEvents(timedEvents, startHour, endHour);
     positioned.forEach(({ event, top, height, left, width }) => {
       this.renderEvent(dayCol, event, top, height, left, width);
     });
@@ -566,6 +577,22 @@ class GCalView extends ItemView {
       });
     });
 
+    // All-day strip
+    const hasAnyAllDay = days.some((d) =>
+      this.getEventsForDate(d).some((e) => !!e.start.date && !e.start.dateTime)
+    );
+    if (hasAnyAllDay) {
+      const allDayRow = container.createDiv({ cls: "gcal-allday-row" });
+      allDayRow.createDiv({ cls: "gcal-allday-gutter", text: "all day" });
+      days.forEach((day) => {
+        const allDayCol = allDayRow.createDiv({ cls: "gcal-allday-col" });
+        const allDayEvents = this.getEventsForDate(day).filter(
+          (e) => !!e.start.date && !e.start.dateTime
+        );
+        allDayEvents.forEach((e) => this.renderAllDayEvent(allDayCol, e));
+      });
+    }
+
     const scrollWrap = container.createDiv({ cls: "gcal-scroll-wrap" });
     const grid = scrollWrap.createDiv({ cls: "gcal-grid gcal-week-grid" });
     const totalHours = endHour - startHour;
@@ -613,8 +640,10 @@ class GCalView extends ItemView {
         this.openNewEventModal(start, end);
       });
 
-      const dayEvents = this.getEventsForDate(day);
-      const positioned = this.positionEvents(dayEvents, startHour, endHour);
+      const allDayEventsForDay = this.getEventsForDate(day).filter(
+        (e) => !!e.start.dateTime
+      );
+      const positioned = this.positionEvents(allDayEventsForDay, startHour, endHour);
       positioned.forEach(({ event, top, height, left, width }) => {
         this.renderEvent(dayCol, event, top, height, left, width);
       });
@@ -686,6 +715,16 @@ class GCalView extends ItemView {
     });
 
     return results;
+  }
+
+  // ── Render all-day event chip ─────────────────────────────────────────────────
+
+  renderAllDayEvent(col: HTMLElement, event: GCalEvent) {
+    const el = col.createDiv({ cls: "gcal-allday-event" });
+    el.style.backgroundColor = event.calendarColor + "33";
+    el.style.borderLeftColor = event.calendarColor;
+    el.setText(event.summary || "(No title)");
+    el.onclick = () => this.openEditEventModal(event);
   }
 
   // ── Render single event ───────────────────────────────────────────────────────

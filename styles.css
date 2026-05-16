@@ -173,7 +173,63 @@
   line-height: 1.2;
 }
 
-/* ─── Scroll Wrapper ──────────────────────────────────────────────────────── */
+/* ─── All-Day Strip ───────────────────────────────────────────────────────── */
+
+.gcal-allday-row {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 2px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  min-height: 28px;
+}
+
+.gcal-allday-gutter {
+  width: 44px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--background-modifier-border);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 5px;
+  font-size: 9px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gcal-allday-col {
+  flex: 1;
+  padding: 3px 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 28px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+
+.gcal-allday-col:first-of-type {
+  border-left: none;
+}
+
+.gcal-allday-event {
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-normal);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-left: 3px solid transparent;
+  transition: filter 0.1s;
+}
+
+.gcal-allday-event:hover {
+  filter: brightness(1.1);
+}
+
+
 
 .gcal-scroll-wrap {
   flex: 1;
@@ -243,10 +299,10 @@
   position: absolute;
   left: 0;
   right: 0;
-  height: 1px;
-  background: var(--background-modifier-border);
-  opacity: 0.4;
-  border-style: dashed;
+  height: 0;
+  border: none;
+  border-top: 1px dashed var(--background-modifier-border);
+  opacity: 0.5;
 }
 
 /* ─── Events ──────────────────────────────────────────────────────────────── */
