@@ -14,8 +14,6 @@ import {
 
 const VIEW_TYPE = "gcal-timeblock-view";
 const HOUR_HEIGHT = 60; // px per hour
-const DAY_START = 0;    // 0 = midnight
-const DAY_END = 24;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,12 +63,14 @@ const DEFAULT_SETTINGS: GCalSettings = {
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
 
-async function refreshAccessToken(settings) {
+// FIX (token expiry): mutates settings in place so expiry reflects what Google
+// actually returns, rather than being blindly reset on every getToken() call.
+async function refreshAccessToken(settings: GCalSettings): Promise<string> {
   if (!settings.clientId || !settings.clientSecret || !settings.refreshToken) {
     throw new Error("Google API credentials not configured.");
   }
-  if (settings.accessToken && Date.now() < settings.tokenExpiry - 6e4) {
-    return settings.accessToken;  // still valid, return as-is
+  if (settings.accessToken && Date.now() < settings.tokenExpiry - 60000) {
+    return settings.accessToken;
   }
   const resp = await requestUrl({
     url: "https://oauth2.googleapis.com/token",
@@ -80,13 +80,13 @@ async function refreshAccessToken(settings) {
       client_id: settings.clientId,
       client_secret: settings.clientSecret,
       refresh_token: settings.refreshToken,
-      grant_type: "refresh_token"
-    }).toString()
+      grant_type: "refresh_token",
+    }).toString(),
   });
   const data = resp.json;
   if (data.error) throw new Error(data.error_description || data.error);
 
-  // Use Google's actual expires_in value rather than assuming 3600
+  // Use Google's actual expires_in rather than assuming 3600
   settings.accessToken = data.access_token;
   settings.tokenExpiry = Date.now() + (data.expires_in ?? 3600) * 1000;
 
@@ -166,6 +166,22 @@ async function updateEvent(
   return resp.json;
 }
 
+async function moveEvent(
+  token: string,
+  sourceCalendarId: string,
+  eventId: string,
+  destinationCalendarId: string
+): Promise<GCalEvent> {
+  const resp = await requestUrl({
+    url: `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
+      sourceCalendarId
+    )}/events/${eventId}/move?destination=${encodeURIComponent(destinationCalendarId)}`,
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return resp.json;
+}
+
 async function deleteEvent(
   token: string,
   calendarId: string,
@@ -193,7 +209,6 @@ function toLocalISOString(date: Date): string {
  * new Date("2024-05-16T18:30") incorrectly parses as UTC — this avoids that.
  */
 function localStringToDate(s: string): Date {
-  // Split into parts and construct using local-time overload of Date
   const [datePart, timePart] = s.split("T");
   const [year, month, day] = datePart.split("-").map(Number);
   const [hour, minute] = (timePart || "00:00").split(":").map(Number);
@@ -206,7 +221,7 @@ function localTimeZone(): string {
 }
 
 function dateKey(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function startOfWeek(date: Date): Date {
@@ -328,7 +343,6 @@ class EventModal extends Modal {
         new Notice("Please enter a title.");
         return;
       }
-      // Attach local timezone so Google stores the event in the right timezone
       const tz = localTimeZone();
       if (this.event.start?.dateTime) this.event.start.timeZone = tz;
       if (this.event.end?.dateTime) this.event.end.timeZone = tz;
@@ -417,7 +431,7 @@ class QuickTitleModal extends Modal {
 
 class GCalView extends ItemView {
   plugin: GCalTimeblockPlugin;
-  private currentDate: Date;
+  currentDate: Date;
   private viewMode: "day" | "week";
   private events: GCalEvent[] = [];
   private loading = false;
@@ -434,8 +448,15 @@ class GCalView extends ItemView {
   getDisplayText() { return "GCal Timeblock"; }
   getIcon() { return "calendar-days"; }
 
+  // FIX (startup cache): load cached events instantly, render them, then
+  // kick off a live refresh in the background and re-render when done.
   async onOpen() {
+    const saved = await this.plugin.loadData();
+    if (saved?.cachedEvents) {
+      this.events = saved.cachedEvents;
+    }
     await this.renderView();
+    await this.loadAndRender();
   }
 
   async onClose() {}
@@ -592,7 +613,6 @@ class GCalView extends ItemView {
       const line = dayCol.createDiv({ cls: "gcal-hour-line" });
       line.style.top = `${y}px`;
 
-      // Half-hour line
       if (h < endHour) {
         const halfLine = dayCol.createDiv({ cls: "gcal-half-line" });
         halfLine.style.top = `${y + HOUR_HEIGHT / 2}px`;
@@ -615,11 +635,11 @@ class GCalView extends ItemView {
       if (nowMins >= 0 && nowMins <= totalHours * 60) {
         const nowLine = dayCol.createDiv({ cls: "gcal-now-line" });
         nowLine.style.top = `${(nowMins / 60) * HOUR_HEIGHT}px`;
-        const nowDot = nowLine.createDiv({ cls: "gcal-now-dot" });
+        nowLine.createDiv({ cls: "gcal-now-dot" });
       }
     }
 
-    // Scroll to current time or start hour
+    // Scroll to current time
     setTimeout(() => {
       const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
       scrollWrap.scrollTop = scrollTo;
@@ -705,10 +725,10 @@ class GCalView extends ItemView {
       // Drag-to-create
       this.attachDragCreate(dayCol, scrollWrap, startHour, day);
 
-      const allDayEventsForDay = this.getEventsForDate(day).filter(
+      const timedEventsForDay = this.getEventsForDate(day).filter(
         (e) => !!e.start.dateTime
       );
-      const positioned = this.positionEvents(allDayEventsForDay, startHour, endHour);
+      const positioned = this.positionEvents(timedEventsForDay, startHour, endHour);
       positioned.forEach(({ event, top, height, left, width }) => {
         this.renderEvent(dayCol, event, top, height, left, width);
       });
@@ -742,7 +762,6 @@ class GCalView extends ItemView {
     const results: { event: GCalEvent; top: number; height: number; left: number; width: number }[] = [];
     const timedEvents = events.filter((e) => e.start.dateTime);
 
-    // Simple overlap detection - group overlapping events
     const groups: GCalEvent[][] = [];
     timedEvents.forEach((event) => {
       const eStart = new Date(event.start.dateTime!).getTime();
@@ -882,7 +901,6 @@ class GCalView extends ItemView {
       }
       if (e.start.date && e.end.date) {
         // All-day: start is inclusive, end is exclusive (Google Calendar convention)
-        // So a multi-day event shows on every day from start up to (but not including) end
         return key >= e.start.date && key < e.end.date;
       }
       if (e.start.date) {
@@ -892,8 +910,10 @@ class GCalView extends ItemView {
     });
   }
 
-  async getToken() {
-    await refreshAccessToken(this.plugin.settings); // mutates settings in place
+  // FIX (token expiry): delegate expiry tracking entirely to refreshAccessToken,
+  // which now mutates settings in place with the real expires_in value.
+  async getToken(): Promise<string> {
+    await refreshAccessToken(this.plugin.settings);
     await this.plugin.saveSettings();
     return this.plugin.settings.accessToken;
   }
@@ -934,6 +954,12 @@ class GCalView extends ItemView {
         }
       }
       this.events = allEvents;
+
+      // FIX (startup cache): persist fetched events so they're available
+      // immediately on the next startup before the network responds.
+      const saved = await this.plugin.loadData() ?? {};
+      await this.plugin.saveData({ ...saved, cachedEvents: allEvents });
+
     } catch (err: any) {
       new Notice("Failed to load events: " + err.message);
     }
@@ -949,11 +975,13 @@ class GCalView extends ItemView {
     let dragStartY = 0;
     let dragStartMins = 0;
 
+    // FIX (drag scroll): getBoundingClientRect().top is already viewport-relative
+    // and naturally reflects scroll position, so adding scrollTop double-counts it.
+    // Remove scrollTop — the coordinate is correct without it.
     const yToMins = (clientY: number): number => {
       const rect = col.getBoundingClientRect();
       const relY = clientY - rect.top;
       const rawMins = (relY / HOUR_HEIGHT) * 60;
-      // Snap to 15-minute slots
       return Math.round(rawMins / 15) * 15;
     };
 
@@ -971,7 +999,6 @@ class GCalView extends ItemView {
       dragEl.style.top = `${minsToTop(dragStartMins)}px`;
       dragEl.style.height = `${minsToTop(60)}px`; // start at 1hr
 
-      // Time labels rendered as siblings in the column, not children of ghost
       const startLabel = col.createDiv({ cls: "gcal-drag-start-label" });
       const endLabel = col.createDiv({ cls: "gcal-drag-end-label" });
       const durationPill = dragEl.createDiv({ cls: "gcal-drag-duration" });
@@ -997,7 +1024,6 @@ class GCalView extends ItemView {
         const eH = startHour + Math.floor(endMins / 60);
         const eM = endMins % 60;
 
-        // Position labels just outside the ghost edges
         startLabel.style.top = `${topPx - 14}px`;
         startLabel.setText(fmt(sH, sM));
         endLabel.style.top = `${topPx + heightPx + 2}px`;
@@ -1035,8 +1061,6 @@ class GCalView extends ItemView {
 
         // If barely moved (< 5px), treat as a plain click → full modal
         if (Math.abs(me.clientY - dragStartY) < 5) {
-          startLabel.remove();
-          endLabel.remove();
           const start = new Date(day);
           start.setHours(startHour + Math.floor(startMins / 60), startMins % 60, 0, 0);
           const end = new Date(start.getTime() + 60 * 60 * 1000);
@@ -1060,7 +1084,6 @@ class GCalView extends ItemView {
           const tz = localTimeZone();
 
           if (openFull) {
-            // Pre-fill and open the full event modal
             const stub: Partial<GCalEvent> = {
               summary: title,
               start: { dateTime: start.toISOString(), timeZone: tz },
@@ -1126,6 +1149,9 @@ class GCalView extends ItemView {
     }).open();
   }
 
+  // FIX (calendar change): use the events.move API when the user picks a
+  // different calendar, then update the event content on the new calendar.
+  // Previously calId was ignored and the PUT always targeted event.calendarId.
   openEditEventModal(event: GCalEvent) {
     new EventModal(
       this.app,
@@ -1134,7 +1160,13 @@ class GCalView extends ItemView {
       async (updated, calId) => {
         try {
           const token = await this.getToken();
-          await updateEvent(token, event.calendarId, event.id, updated);
+          if (calId && calId !== event.calendarId) {
+            // Move to the new calendar first, then update content
+            await moveEvent(token, event.calendarId, event.id, calId);
+            await updateEvent(token, calId, event.id, updated);
+          } else {
+            await updateEvent(token, event.calendarId, event.id, updated);
+          }
           new Notice("Event updated.");
           this.loadAndRender();
         } catch (err: any) {
@@ -1323,7 +1355,6 @@ class GCalSettingsTab extends PluginSettingTab {
         btn.setButtonText("Load Calendars").onClick(async () => {
           try {
             const token = await refreshAccessToken(this.plugin.settings);
-            this.plugin.settings.accessToken = token;
             this.plugin.settings.tokenExpiry = Date.now() + 3600 * 1000;
             const cals = await fetchCalendarList(token);
             // Merge — preserve enabled state
@@ -1345,7 +1376,7 @@ class GCalSettingsTab extends PluginSettingTab {
     if (this.plugin.settings.calendars.length > 0) {
       containerEl.createEl("h3", { text: "Calendars" });
       this.plugin.settings.calendars.forEach((cal, idx) => {
-        const setting = new Setting(containerEl)
+        new Setting(containerEl)
           .setName(cal.name)
           .setDesc(cal.id)
           .addColorPicker((cp) =>
