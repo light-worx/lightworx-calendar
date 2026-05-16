@@ -948,7 +948,7 @@ class GCalView extends ItemView {
 
     const yToMins = (clientY: number): number => {
       const rect = col.getBoundingClientRect();
-      const relY = clientY - rect.top + scrollWrap.scrollTop;
+      const relY = clientY - rect.top;
       const rawMins = (relY / HOUR_HEIGHT) * 60;
       // Snap to 15-minute slots
       return Math.round(rawMins / 15) * 15;
