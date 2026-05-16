@@ -183,6 +183,18 @@ function toLocalISOString(date: Date): string {
   return d.toISOString().slice(0, 16);
 }
 
+/**
+ * Parse a datetime-local string (e.g. "2024-05-16T18:30") as LOCAL time.
+ * new Date("2024-05-16T18:30") incorrectly parses as UTC — this avoids that.
+ */
+function localStringToDate(s: string): Date {
+  // Split into parts and construct using local-time overload of Date
+  const [datePart, timePart] = s.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour, minute] = (timePart || "00:00").split(":").map(Number);
+  return new Date(year, month - 1, day, hour, minute, 0, 0);
+}
+
 function dateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
 }
@@ -267,15 +279,15 @@ class EventModal extends Modal {
       text.inputEl.value = startVal;
       text.inputEl.style.width = "100%";
       text.onChange((v) => {
-        this.event.start = { dateTime: new Date(v).toISOString() };
+        this.event.start = { dateTime: localStringToDate(v).toISOString() };
       });
     });
-    this.event.start = { dateTime: new Date(startVal).toISOString() };
+    this.event.start = { dateTime: localStringToDate(startVal).toISOString() };
 
     // End time
     const endDate = this.event.end?.dateTime
       ? new Date(this.event.end.dateTime)
-      : new Date(new Date(startVal).getTime() + 60 * 60 * 1000);
+      : new Date(localStringToDate(startVal).getTime() + 60 * 60 * 1000);
     const endVal = toLocalISOString(endDate);
 
     new Setting(contentEl).setName("End").addText((text) => {
@@ -283,7 +295,7 @@ class EventModal extends Modal {
       text.inputEl.value = endVal;
       text.inputEl.style.width = "100%";
       text.onChange((v) => {
-        this.event.end = { dateTime: new Date(v).toISOString() };
+        this.event.end = { dateTime: localStringToDate(v).toISOString() };
       });
     });
     this.event.end = { dateTime: endDate.toISOString() };
@@ -945,30 +957,59 @@ class GCalView extends ItemView {
 
       dragEl = col.createDiv({ cls: "gcal-drag-ghost" });
       dragEl.style.top = `${minsToTop(dragStartMins)}px`;
-      dragEl.style.height = `${HOUR_HEIGHT}px`; // default 1hr placeholder
+      dragEl.style.height = `${HOUR_HEIGHT}px`;
 
-      const label = dragEl.createEl("span", { cls: "gcal-drag-label" });
-      label.setText("New event");
+      // Top edge line + start time label
+      const topEdge = dragEl.createDiv({ cls: "gcal-drag-edge gcal-drag-edge-top" });
+      topEdge.createDiv({ cls: "gcal-drag-edge-line" });
+      const topLabel = topEdge.createEl("span", { cls: "gcal-drag-time-label" });
 
-      const onMove = (me: MouseEvent) => {
-        if (!dragEl) return;
-        const currentMins = yToMins(me.clientY);
+      // Content area: title
+      dragEl.createEl("span", { cls: "gcal-drag-label", text: "New event" });
+
+      // Duration pill in the middle
+      const durationPill = dragEl.createEl("span", { cls: "gcal-drag-duration" });
+
+      // Bottom edge line + end time label
+      const bottomEdge = dragEl.createDiv({ cls: "gcal-drag-edge gcal-drag-edge-bottom" });
+      const bottomLabel = bottomEdge.createEl("span", { cls: "gcal-drag-time-label" });
+      bottomEdge.createDiv({ cls: "gcal-drag-edge-line" });
+
+      const fmt = (h: number, m: number) => {
+        const ampm = h < 12 ? "AM" : "PM";
+        const h12 = h % 12 || 12;
+        return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
+      };
+
+      const updateGhost = (currentMins: number) => {
         const startMins = Math.min(dragStartMins, currentMins);
         const endMins = Math.max(dragStartMins + 15, currentMins);
-        dragEl.style.top = `${minsToTop(startMins)}px`;
-        dragEl.style.height = `${minsToTop(endMins - startMins)}px`;
+        dragEl!.style.top = `${minsToTop(startMins)}px`;
+        dragEl!.style.height = `${minsToTop(endMins - startMins)}px`;
 
-        // Live time label
         const sH = startHour + Math.floor(startMins / 60);
         const sM = startMins % 60;
         const eH = startHour + Math.floor(endMins / 60);
         const eM = endMins % 60;
-        const fmt = (h: number, m: number) => {
-          const ampm = h < 12 ? "AM" : "PM";
-          const h12 = h % 12 || 12;
-          return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
-        };
-        label.setText(`${fmt(sH, sM)} – ${fmt(eH, eM)}`);
+        topLabel.setText(fmt(sH, sM));
+        bottomLabel.setText(fmt(eH, eM));
+
+        const durMins = endMins - startMins;
+        const durH = Math.floor(durMins / 60);
+        const durM = durMins % 60;
+        durationPill.setText(
+          durH > 0 && durM > 0 ? `${durH}h ${durM}m` :
+          durH > 0 ? `${durH}h` : `${durM}m`
+        );
+        // Hide duration pill if block is too short to show it
+        durationPill.style.display = minsToTop(durMins) < 36 ? "none" : "";
+      };
+
+      updateGhost(dragStartMins + 60); // initialise at 1 hour
+
+      const onMove = (me: MouseEvent) => {
+        if (!dragEl) return;
+        updateGhost(yToMins(me.clientY));
       };
 
       const onUp = (me: MouseEvent) => {
