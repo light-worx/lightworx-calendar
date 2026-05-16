@@ -881,7 +881,10 @@ class GCalView extends ItemView {
           end: { dateTime: newEnd.toISOString() },
         });
         new Notice("Event updated.");
-        this.loadAndRender();
+        await this.optimisticUpdate({
+          ...event,
+          end: { dateTime: newEnd.toISOString(), timeZone: event.end.timeZone },
+        });
       } catch (err: any) {
         new Notice("Failed to update event: " + err.message);
       }
@@ -916,6 +919,58 @@ class GCalView extends ItemView {
     await refreshAccessToken(this.plugin.settings);
     await this.plugin.saveSettings();
     return this.plugin.settings.accessToken;
+  }
+
+  // ── Optimistic local mutations ────────────────────────────────────────────────
+  // These update this.events and re-render immediately without a loading flash,
+  // then kick off a silent background refresh to get the real server state.
+
+  private async optimisticAdd(tempEvent: GCalEvent) {
+    this.events = [...this.events, tempEvent];
+    await this.renderView();
+    this.silentRefresh();
+  }
+
+  private async optimisticUpdate(updated: GCalEvent) {
+    this.events = this.events.map(e =>
+      e.id === updated.id && e.calendarId === updated.calendarId ? updated : e
+    );
+    await this.renderView();
+    this.silentRefresh();
+  }
+
+  private async optimisticDelete(calendarId: string, id: string) {
+    this.events = this.events.filter(e => !(e.id === id && e.calendarId === calendarId));
+    await this.renderView();
+    this.silentRefresh();
+  }
+
+  // Re-fetch in the background and re-render when done — no loading spinner.
+  private async silentRefresh() {
+    try {
+      const token = await this.getToken();
+      const enabled = this.plugin.settings.calendars.filter(c => c.enabled);
+      let timeMin: Date, timeMax: Date;
+      if (this.viewMode === "day") {
+        timeMin = new Date(this.currentDate);
+        timeMax = new Date(this.currentDate); timeMax.setDate(timeMax.getDate() + 1);
+      } else {
+        timeMin = startOfWeek(this.currentDate);
+        timeMax = new Date(timeMin); timeMax.setDate(timeMax.getDate() + 7);
+      }
+      const all: GCalEvent[] = [];
+      for (const cal of enabled) {
+        try {
+          all.push(...await fetchEvents(token, cal.id, cal.color, timeMin.toISOString(), timeMax.toISOString()));
+        } catch (err) { console.warn(`Failed to fetch ${cal.name}:`, err); }
+      }
+      this.events = all;
+      const saved = await this.plugin.loadData() ?? {};
+      await this.plugin.saveData({ ...saved, cachedEvents: all });
+      await this.renderView();
+    } catch (err: any) {
+      console.warn("Silent refresh failed:", err.message);
+    }
   }
 
   async loadAndRender() {
@@ -1094,9 +1149,10 @@ class GCalView extends ItemView {
             new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
               try {
                 const token = await this.getToken();
-                await createEvent(token, calId, event);
+                const created = await createEvent(token, calId, event);
+                const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
                 new Notice("Event created.");
-                this.loadAndRender();
+                await this.optimisticAdd({ ...created, calendarId: calId, calendarColor: calColor });
               } catch (err: any) {
                 new Notice("Failed to create event: " + err.message);
               }
@@ -1104,13 +1160,14 @@ class GCalView extends ItemView {
           } else {
             try {
               const token = await this.getToken();
-              await createEvent(token, defaultCalId, {
+              const created = await createEvent(token, defaultCalId, {
                 summary: title,
                 start: { dateTime: start.toISOString(), timeZone: tz },
                 end: { dateTime: end.toISOString(), timeZone: tz },
               });
+              const calColor = this.plugin.settings.calendars.find(c => c.id === defaultCalId)?.color || "#4285F4";
               new Notice("Event created.");
-              this.loadAndRender();
+              await this.optimisticAdd({ ...created, calendarId: defaultCalId, calendarColor: calColor });
             } catch (err: any) {
               new Notice("Failed to create event: " + err.message);
             }
@@ -1140,9 +1197,10 @@ class GCalView extends ItemView {
     new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
       try {
         const token = await this.getToken();
-        await createEvent(token, calId, event);
+        const created = await createEvent(token, calId, event);
+        const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
         new Notice("Event created.");
-        this.loadAndRender();
+        await this.optimisticAdd({ ...created, calendarId: calId, calendarColor: calColor });
       } catch (err: any) {
         new Notice("Failed to create event: " + err.message);
       }
@@ -1160,15 +1218,16 @@ class GCalView extends ItemView {
       async (updated, calId) => {
         try {
           const token = await this.getToken();
+          let finalCalId = calId;
           if (calId && calId !== event.calendarId) {
-            // Move to the new calendar first, then update content
             await moveEvent(token, event.calendarId, event.id, calId);
             await updateEvent(token, calId, event.id, updated);
           } else {
             await updateEvent(token, event.calendarId, event.id, updated);
           }
+          const calColor = this.plugin.settings.calendars.find(c => c.id === finalCalId)?.color || event.calendarColor;
           new Notice("Event updated.");
-          this.loadAndRender();
+          await this.optimisticUpdate({ ...updated, id: event.id, calendarId: finalCalId, calendarColor: calColor } as GCalEvent);
         } catch (err: any) {
           new Notice("Failed to update event: " + err.message);
         }
@@ -1178,7 +1237,7 @@ class GCalView extends ItemView {
           const token = await this.getToken();
           await deleteEvent(token, event.calendarId, event.id);
           new Notice("Event deleted.");
-          this.loadAndRender();
+          await this.optimisticDelete(event.calendarId, event.id);
         } catch (err: any) {
           new Notice("Failed to delete event: " + err.message);
         }
