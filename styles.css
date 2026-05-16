@@ -439,6 +439,20 @@
   background: color-mix(in srgb, var(--color-red, #e53935) 80%, black);
 }
 
+/* ─── Auth Code Section ───────────────────────────────────────────────────── */
+
+.gcal-code-section {
+  border: 1px solid var(--interactive-accent);
+  border-radius: 8px;
+  padding: 4px 12px 8px;
+  margin: 8px 0 16px;
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+}
+
+.gcal-code-section .setting-item {
+  border: none;
+}
+
 /* ─── Settings ────────────────────────────────────────────────────────────── */
 
 .gcal-settings-guide {

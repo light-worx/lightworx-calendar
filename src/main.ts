@@ -912,8 +912,9 @@ class GCalSettingsTab extends PluginSettingTab {
       <li>Enable the <strong>Google Calendar API</strong></li>
       <li>Go to <strong>APIs &amp; Services → Credentials</strong></li>
       <li>Create an <strong>OAuth 2.0 Client ID</strong> (Desktop app type)</li>
-      <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> below</li>
-      <li>Use the <strong>Get Refresh Token</strong> button below to authenticate</li>
+      <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> into the fields below</li>
+      <li>Click <strong>Open Auth URL</strong>, grant access, paste the code into Step 2, click Exchange</li>
+      <li>Click <strong>Load Calendars</strong> to finish</li>
     `;
 
     // Client ID
@@ -962,14 +963,18 @@ class GCalSettingsTab extends PluginSettingTab {
           });
       });
 
-    // Auth button
+    // ── Step 1: Open Auth URL ──────────────────────────────────────────────────
     new Setting(containerEl)
-      .setName("Authenticate with Google")
-      .setDesc("Opens the Google OAuth consent screen in your browser. Paste the refresh token above afterwards.")
+      .setName("Step 1 — Open Google Auth")
+      .setDesc("Click to open the Google consent screen in your browser. Grant access, then copy the authorisation code shown.")
       .addButton((btn) =>
-        btn.setButtonText("Open Auth URL").onClick(() => {
+        btn.setButtonText("Open Auth URL").setCta().onClick(() => {
           if (!this.plugin.settings.clientId) {
             new Notice("Enter your Client ID first.");
+            return;
+          }
+          if (!this.plugin.settings.clientSecret) {
+            new Notice("Enter your Client Secret first.");
             return;
           }
           const authUrl =
@@ -983,10 +988,62 @@ class GCalSettingsTab extends PluginSettingTab {
               prompt: "consent",
             }).toString();
           window.open(authUrl, "_blank");
-          new Notice(
-            "Complete auth in browser, then exchange the code for a refresh token using the instructions in the plugin README.",
-            10000
-          );
+          // Show the code input section
+          codeSection.style.display = "block";
+          new Notice("Browser opened — grant access, then paste the code below.", 6000);
+        })
+      );
+
+    // ── Step 2: Paste auth code ────────────────────────────────────────────────
+    const codeSection = containerEl.createDiv({ cls: "gcal-code-section" });
+    codeSection.style.display = this.plugin.settings.refreshToken ? "none" : "block";
+
+    let authCode = "";
+
+    new Setting(codeSection)
+      .setName("Step 2 — Paste Authorisation Code")
+      .setDesc("Paste the code Google gave you after granting permission, then click Exchange.")
+      .addText((text) => {
+        text.setPlaceholder("4/0AX4XfWh…").onChange((v) => {
+          authCode = v.trim();
+        });
+        text.inputEl.style.width = "260px";
+      })
+      .addButton((btn) =>
+        btn.setButtonText("Exchange for Token").onClick(async () => {
+          if (!authCode) {
+            new Notice("Paste the authorisation code first.");
+            return;
+          }
+          btn.setButtonText("Exchanging…").setDisabled(true);
+          try {
+            const resp = await requestUrl({
+              url: "https://oauth2.googleapis.com/token",
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                client_id: this.plugin.settings.clientId,
+                client_secret: this.plugin.settings.clientSecret,
+                code: authCode,
+                grant_type: "authorization_code",
+                redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
+              }).toString(),
+            });
+            const data = resp.json;
+            if (data.error) {
+              throw new Error(data.error_description || data.error);
+            }
+            this.plugin.settings.refreshToken = data.refresh_token;
+            this.plugin.settings.accessToken = data.access_token;
+            this.plugin.settings.tokenExpiry = Date.now() + (data.expires_in || 3600) * 1000;
+            await this.plugin.saveSettings();
+            new Notice("✅ Authenticated! Now click 'Load Calendars'.", 8000);
+            codeSection.style.display = "none";
+            this.display(); // re-render to show the refresh token field populated
+          } catch (err: any) {
+            new Notice("Token exchange failed: " + err.message, 8000);
+            btn.setButtonText("Exchange for Token").setDisabled(false);
+          }
         })
       );
 
