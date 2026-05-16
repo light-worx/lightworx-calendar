@@ -65,12 +65,12 @@ const DEFAULT_SETTINGS: GCalSettings = {
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
 
-async function refreshAccessToken(settings: GCalSettings): Promise<string> {
+async function refreshAccessToken(settings) {
   if (!settings.clientId || !settings.clientSecret || !settings.refreshToken) {
     throw new Error("Google API credentials not configured.");
   }
-  if (settings.accessToken && Date.now() < settings.tokenExpiry - 60000) {
-    return settings.accessToken;
+  if (settings.accessToken && Date.now() < settings.tokenExpiry - 6e4) {
+    return settings.accessToken;  // still valid, return as-is
   }
   const resp = await requestUrl({
     url: "https://oauth2.googleapis.com/token",
@@ -80,11 +80,16 @@ async function refreshAccessToken(settings: GCalSettings): Promise<string> {
       client_id: settings.clientId,
       client_secret: settings.clientSecret,
       refresh_token: settings.refreshToken,
-      grant_type: "refresh_token",
-    }).toString(),
+      grant_type: "refresh_token"
+    }).toString()
   });
   const data = resp.json;
   if (data.error) throw new Error(data.error_description || data.error);
+
+  // Use Google's actual expires_in value rather than assuming 3600
+  settings.accessToken = data.access_token;
+  settings.tokenExpiry = Date.now() + (data.expires_in ?? 3600) * 1000;
+
   return data.access_token;
 }
 
@@ -887,12 +892,10 @@ class GCalView extends ItemView {
     });
   }
 
-  async getToken(): Promise<string> {
-    const token = await refreshAccessToken(this.plugin.settings);
-    this.plugin.settings.accessToken = token;
-    this.plugin.settings.tokenExpiry = Date.now() + 3600 * 1000;
+  async getToken() {
+    await refreshAccessToken(this.plugin.settings); // mutates settings in place
     await this.plugin.saveSettings();
-    return token;
+    return this.plugin.settings.accessToken;
   }
 
   async loadAndRender() {
