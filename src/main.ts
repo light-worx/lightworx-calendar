@@ -436,6 +436,8 @@ class GCalView extends ItemView {
   private events: GCalEvent[] = [];
   private loading = false;
   private hasScrolled = false;
+  private cachedWindowStart: Date | null = null;
+  private cachedWindowEnd:   Date | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: GCalTimeblockPlugin) {
     super(leaf);
@@ -446,7 +448,7 @@ class GCalView extends ItemView {
   }
 
   getViewType() { return VIEW_TYPE; }
-  getDisplayText() { return "GCal Timeblock"; }
+  getDisplayText() { return "Lightworx calendar"; }
   getIcon() { return "calendar-days"; }
 
   // FIX (startup cache): load cached events instantly, render them, then
@@ -455,9 +457,12 @@ class GCalView extends ItemView {
     const saved = await this.plugin.loadData();
     if (saved?.cachedEvents) {
       this.events = saved.cachedEvents;
+      if (saved.cachedWindowStart) this.cachedWindowStart = new Date(saved.cachedWindowStart);
+      if (saved.cachedWindowEnd)   this.cachedWindowEnd   = new Date(saved.cachedWindowEnd);
     }
+    // Render immediately with cached data (no spinner), then refresh in background
     await this.renderView();
-    await this.loadAndRender();
+    this.fetchAndCache().then(() => this.renderView()).catch(console.warn);
   }
 
   async onClose() {}
@@ -860,6 +865,18 @@ class GCalView extends ItemView {
       const resizeHandle = el.createDiv({ cls: "gcal-resize-handle" });
       resizeHandle.addEventListener("mousedown", (e) => {
         e.stopPropagation();
+        let moved = false;
+        const onMove = () => { moved = true; };
+        const onUp = () => {
+          document.removeEventListener("mousemove", onMove);
+          document.removeEventListener("mouseup", onUp);
+          if (moved) {
+            // Block the next click so the modal doesn't open after a resize drag
+            el.addEventListener("click", (ce) => ce.stopPropagation(), { capture: true, once: true });
+          }
+        };
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
         this.startResize(e, event, el, col, top);
       });
     }
@@ -890,10 +907,8 @@ class GCalView extends ItemView {
           end: { dateTime: newEnd.toISOString() },
         });
         new Notice("Event updated.");
-        await this.optimisticUpdate({
-          ...event,
-          end: { dateTime: newEnd.toISOString(), timeZone: event.end.timeZone },
-        });
+        this.updateInCache(event.id, event.calendarId, { end: { dateTime: newEnd.toISOString(), timeZone: event.end.timeZone } });
+        await this.renderThenRefresh();
       } catch (err: any) {
         new Notice("Failed to update event: " + err.message);
       }
@@ -930,106 +945,65 @@ class GCalView extends ItemView {
     return this.plugin.settings.accessToken;
   }
 
-  // ── Optimistic local mutations ────────────────────────────────────────────────
-  // These update this.events and re-render immediately without a loading flash,
-  // then kick off a silent background refresh to get the real server state.
-
-  private async optimisticAdd(tempEvent: GCalEvent) {
-    this.events = [...this.events, tempEvent];
-    await this.renderView();
-    this.silentRefresh();
-  }
-
-  private async optimisticUpdate(updated: GCalEvent) {
-    this.events = this.events.map(e =>
-      e.id === updated.id && e.calendarId === updated.calendarId ? updated : e
-    );
-    await this.renderView();
-    this.silentRefresh();
-  }
-
-  private async optimisticDelete(calendarId: string, id: string) {
-    this.events = this.events.filter(e => !(e.id === id && e.calendarId === calendarId));
-    await this.renderView();
-    this.silentRefresh();
-  }
-
-  // Re-fetch in the background and re-render when done — no loading spinner.
-  private async silentRefresh() {
-    try {
-      const token = await this.getToken();
-      const enabled = this.plugin.settings.calendars.filter(c => c.enabled);
-      let timeMin: Date, timeMax: Date;
-      if (this.viewMode === "day") {
-        timeMin = new Date(this.currentDate);
-        timeMax = new Date(this.currentDate); timeMax.setDate(timeMax.getDate() + 1);
-      } else {
-        timeMin = startOfWeek(this.currentDate);
-        timeMax = new Date(timeMin); timeMax.setDate(timeMax.getDate() + 7);
-      }
-      const all: GCalEvent[] = [];
-      for (const cal of enabled) {
-        try {
-          all.push(...await fetchEvents(token, cal.id, cal.color, timeMin.toISOString(), timeMax.toISOString()));
-        } catch (err) { console.warn(`Failed to fetch ${cal.name}:`, err); }
-      }
-      this.events = all;
-      const saved = await this.plugin.loadData() ?? {};
-      await this.plugin.saveData({ ...saved, cachedEvents: all });
-      await this.renderView();
-    } catch (err: any) {
-      console.warn("Silent refresh failed:", err.message);
+  /** True if the current view's date range is covered by the in-memory cache */
+  private isCached(): boolean {
+    if (!this.cachedWindowStart || !this.cachedWindowEnd) return false;
+    if (this.viewMode === "day") {
+      return this.currentDate >= this.cachedWindowStart && this.currentDate < this.cachedWindowEnd;
+    } else {
+      const ws = startOfWeek(this.currentDate);
+      const we = new Date(ws); we.setDate(we.getDate() + 7);
+      return ws >= this.cachedWindowStart && we <= this.cachedWindowEnd;
     }
   }
 
   async loadAndRender() {
+    if (this.isCached()) {
+      // Data is already in memory — render immediately, refresh silently in background
+      await this.renderView();
+      this.fetchAndCache().then(() => this.renderView()).catch(console.warn);
+      return;
+    }
+    // Not cached — show spinner, fetch, then render
     this.loading = true;
     await this.renderView();
     this.loading = false;
+    await this.fetchAndCache();
+    await this.renderView();
+  }
 
+  /** Fetch a ~5-week window (2 weeks back, 3 weeks forward) and cache it */
+  private async fetchAndCache() {
     try {
       const token = await this.getToken();
       const enabledCals = this.plugin.settings.calendars.filter((c) => c.enabled);
 
-      let timeMin: Date, timeMax: Date;
-      if (this.viewMode === "day") {
-        timeMin = new Date(this.currentDate);
-        timeMax = new Date(this.currentDate);
-        timeMax.setDate(timeMax.getDate() + 1);
-      } else {
-        timeMin = startOfWeek(this.currentDate);
-        timeMax = new Date(timeMin);
-        timeMax.setDate(timeMax.getDate() + 7);
-      }
+      const windowStart = new Date(); windowStart.setDate(windowStart.getDate() - 14); windowStart.setHours(0, 0, 0, 0);
+      const windowEnd   = new Date(); windowEnd.setDate(windowEnd.getDate() + 21);     windowEnd.setHours(0, 0, 0, 0);
 
       const allEvents: GCalEvent[] = [];
       for (const cal of enabledCals) {
         try {
-          const evts = await fetchEvents(
-            token,
-            cal.id,
-            cal.color,
-            timeMin.toISOString(),
-            timeMax.toISOString()
-          );
-          allEvents.push(...evts);
+          allEvents.push(...await fetchEvents(token, cal.id, cal.color, windowStart.toISOString(), windowEnd.toISOString()));
         } catch (err) {
           console.warn(`Failed to fetch ${cal.name}:`, err);
         }
       }
-      this.events = allEvents;
 
-      // FIX (startup cache): persist fetched events so they're available
-      // immediately on the next startup before the network responds.
+      this.events            = allEvents;
+      this.cachedWindowStart = windowStart;
+      this.cachedWindowEnd   = windowEnd;
+
       const saved = await this.plugin.loadData() ?? {};
-      await this.plugin.saveData({ ...saved, cachedEvents: allEvents });
-
+      await this.plugin.saveData({
+        ...saved,
+        cachedEvents:      allEvents,
+        cachedWindowStart: windowStart.toISOString(),
+        cachedWindowEnd:   windowEnd.toISOString(),
+      });
     } catch (err: any) {
       new Notice("Failed to load events: " + err.message);
     }
-
-    this.loading = false;
-    await this.renderView();
   }
 
   // ── Drag-to-create ────────────────────────────────────────────────────────────
@@ -1159,9 +1133,9 @@ class GCalView extends ItemView {
               try {
                 const token = await this.getToken();
                 const created = await createEvent(token, calId, event);
-                const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
                 new Notice("Event created.");
-                await this.optimisticAdd({ ...created, calendarId: calId, calendarColor: calColor });
+                this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+                await this.renderThenRefresh();
               } catch (err: any) {
                 new Notice("Failed to create event: " + err.message);
               }
@@ -1174,9 +1148,9 @@ class GCalView extends ItemView {
                 start: { dateTime: start.toISOString(), timeZone: tz },
                 end: { dateTime: end.toISOString(), timeZone: tz },
               });
-              const calColor = this.plugin.settings.calendars.find(c => c.id === defaultCalId)?.color || "#4285F4";
               new Notice("Event created.");
-              await this.optimisticAdd({ ...created, calendarId: defaultCalId, calendarColor: calColor });
+              this.addToCache({ ...created, calendarId: defaultCalId, calendarColor: calColor });
+              await this.renderThenRefresh();
             } catch (err: any) {
               new Notice("Failed to create event: " + err.message);
             }
@@ -1187,6 +1161,28 @@ class GCalView extends ItemView {
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     });
+  }
+
+  // ── Optimistic local mutations ────────────────────────────────────────────────
+
+  private addToCache(ev: GCalEvent) {
+    this.events = [...this.events, ev];
+  }
+
+  private updateInCache(id: string, calendarId: string, updated: Partial<GCalEvent>) {
+    this.events = this.events.map(e =>
+      e.id === id && e.calendarId === calendarId ? { ...e, ...updated } : e
+    );
+  }
+
+  private removeFromCache(id: string, calendarId: string) {
+    this.events = this.events.filter(e => !(e.id === id && e.calendarId === calendarId));
+  }
+
+  // Re-render immediately, then fetch fresh data quietly in the background
+  private async renderThenRefresh() {
+    await this.renderView();
+    this.fetchAndCache().then(() => this.renderView()).catch(console.warn);
   }
 
   // ── Modals ────────────────────────────────────────────────────────────────────
@@ -1209,7 +1205,8 @@ class GCalView extends ItemView {
         const created = await createEvent(token, calId, event);
         const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
         new Notice("Event created.");
-        await this.optimisticAdd({ ...created, calendarId: calId, calendarColor: calColor });
+        this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+        await this.renderThenRefresh();
       } catch (err: any) {
         new Notice("Failed to create event: " + err.message);
       }
@@ -1227,16 +1224,18 @@ class GCalView extends ItemView {
       async (updated, calId) => {
         try {
           const token = await this.getToken();
-          let finalCalId = calId;
           if (calId && calId !== event.calendarId) {
             await moveEvent(token, event.calendarId, event.id, calId);
             await updateEvent(token, calId, event.id, updated);
+            const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+            this.removeFromCache(event.id, event.calendarId);
+            this.addToCache({ ...event, ...updated, id: event.id, calendarId: calId, calendarColor: calColor } as GCalEvent);
           } else {
             await updateEvent(token, event.calendarId, event.id, updated);
+            this.updateInCache(event.id, event.calendarId, updated);
           }
-          const calColor = this.plugin.settings.calendars.find(c => c.id === finalCalId)?.color || event.calendarColor;
           new Notice("Event updated.");
-          await this.optimisticUpdate({ ...updated, id: event.id, calendarId: finalCalId, calendarColor: calColor } as GCalEvent);
+          await this.renderThenRefresh();
         } catch (err: any) {
           new Notice("Failed to update event: " + err.message);
         }
@@ -1246,7 +1245,8 @@ class GCalView extends ItemView {
           const token = await this.getToken();
           await deleteEvent(token, event.calendarId, event.id);
           new Notice("Event deleted.");
-          await this.optimisticDelete(event.calendarId, event.id);
+          this.removeFromCache(event.id, event.calendarId);
+          await this.renderThenRefresh();
         } catch (err: any) {
           new Notice("Failed to delete event: " + err.message);
         }
@@ -1268,7 +1268,7 @@ class GCalSettingsTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "GCal Timeblock Settings" });
+    containerEl.createEl("h2", { text: "Lightworx calendar Settings" });
 
     // OAuth setup guide
     const guide = containerEl.createEl("details", { cls: "gcal-settings-guide" });
@@ -1533,13 +1533,13 @@ export default class GCalTimeblockPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GCalView(leaf, this));
 
-    this.addRibbonIcon("calendar-days", "Open GCal Timeblock", () => {
+    this.addRibbonIcon("calendar-days", "Open Lightworx calendar", () => {
       this.activateView();
     });
 
     this.addCommand({
       id: "open-gcal-timeblock",
-      name: "Open GCal Timeblock Panel",
+      name: "Open Lightworx calendar Panel",
       callback: () => this.activateView(),
     });
 
@@ -1586,5 +1586,41 @@ export default class GCalTimeblockPlugin extends Plugin {
   getView(): GCalView | null {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
     return leaves.length > 0 ? (leaves[0].view as GCalView) : null;
+  }
+
+  // ── Public API for other Lightworx plugins ────────────────────────────────
+  // Exposes a valid access token and the calendar list so sibling plugins
+  // (e.g. lightworx-tasks) can create calendar events without duplicating
+  // OAuth credential storage or token refresh logic.
+
+  async getAccessToken(): Promise<string> {
+    return refreshAccessToken(this.settings);
+  }
+
+  getCalendars(): CalendarConfig[] {
+    return this.settings.calendars.filter((c) => c.enabled);
+  }
+
+  getDefaultCalendarId(): string {
+    const cals = this.getCalendars();
+    return this.settings.defaultCalendarId || cals[0]?.id || "";
+  }
+
+  async createCalendarEvent(
+    calendarId: string,
+    title: string,
+    description: string | null,
+    startIso: string,       // ISO 8601, e.g. "2026-06-01T09:00:00"
+    endIso: string,         // ISO 8601
+    timeZone?: string
+  ): Promise<GCalEvent> {
+    const token = await this.getAccessToken();
+    const tz = timeZone ?? localTimeZone();
+    return createEvent(token, calendarId, {
+      summary: title,
+      description: description ?? undefined,
+      start: { dateTime: startIso, timeZone: tz },
+      end:   { dateTime: endIso,   timeZone: tz },
+    });
   }
 }
