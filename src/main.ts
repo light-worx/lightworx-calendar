@@ -1155,7 +1155,7 @@ class GCalView extends ItemView {
       col.style.outline = "";
     });
 
-    col.addEventListener("drop", (e: DragEvent) => {
+    col.addEventListener("drop", async (e: DragEvent) => {
       col.style.outline = "";
       const raw = e.dataTransfer?.getData("application/lightworx-task");
       if (!raw) return;
@@ -1183,18 +1183,23 @@ class GCalView extends ItemView {
         calendarId: defaultCalId,
       };
 
-      new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
-        try {
-          const token = await this.getToken();
-          const created = await createEvent(token, calId, event);
-          const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
-          new Notice("Event created from task.");
-          this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
-          await this.renderThenRefresh();
-        } catch (err: any) {
-          new Notice("Failed to create event: " + err.message);
-        }
-      }).open();
+      // Create immediately — no modal, same as the quick-event drag-on-grid flow.
+      const tz = localTimeZone();
+      try {
+        const token = await this.getToken();
+        const created = await createEvent(token, defaultCalId, {
+          summary: task.title ?? "",
+          description: task.description ?? undefined,
+          start: { dateTime: start.toISOString(), timeZone: tz },
+          end:   { dateTime: end.toISOString(),   timeZone: tz },
+        });
+        const calColor = this.plugin.settings.calendars.find(c => c.id === defaultCalId)?.color || "#4285F4";
+        new Notice(`📅 "${task.title}" added to calendar`);
+        this.addToCache({ ...created, calendarId: defaultCalId, calendarColor: calColor });
+        await this.renderThenRefresh();
+      } catch (err: any) {
+        new Notice("Failed to create event: " + err.message);
+      }
     });
   }
 
