@@ -46,6 +46,7 @@ interface GCalSettings {
   startHour: number;
   endHour: number;
   defaultCalendarId: string;
+  defaultTaskDuration: number;  // minutes; used when a task is dropped onto the grid
 }
 
 const DEFAULT_SETTINGS: GCalSettings = {
@@ -59,6 +60,7 @@ const DEFAULT_SETTINGS: GCalSettings = {
   startHour: 6,
   endHour: 22,
   defaultCalendarId: "",
+  defaultTaskDuration: 30,
 };
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -627,8 +629,10 @@ class GCalView extends ItemView {
       }
     }
 
-    // Drag-to-create
+    // Drag-to-create (mouse draw on grid)
     this.attachDragCreate(dayCol, scrollWrap, startHour, this.currentDate);
+    // Drop tasks from Tasks plugin
+    this.attachTaskDrop(dayCol, startHour, this.currentDate);
 
     // Render events
     const positioned = this.positionEvents(timedEvents, startHour, endHour);
@@ -735,6 +739,8 @@ class GCalView extends ItemView {
 
       // Drag-to-create
       this.attachDragCreate(dayCol, scrollWrap, startHour, day);
+      // Drop tasks from Tasks plugin
+      this.attachTaskDrop(dayCol, startHour, day);
 
       const timedEventsForDay = this.getEventsForDate(day).filter(
         (e) => !!e.start.dateTime
@@ -1005,6 +1011,77 @@ class GCalView extends ItemView {
       new Notice("Failed to load events: " + err.message);
     }
   }
+
+  // ── Drop tasks from the Tasks plugin ─────────────────────────────────────────
+  // Reads `application/lightworx-task` JSON set by the tasks plugin drag source.
+  // Calculates the drop time from cursor position, then opens the full EventModal
+  // pre-filled with the task title and description.
+
+  attachTaskDrop(col: HTMLElement, startHour: number, day: Date) {
+    const yToMins = (clientY: number): number => {
+      const rect = col.getBoundingClientRect();
+      const relY = clientY - rect.top;
+      const rawMins = (relY / HOUR_HEIGHT) * 60;
+      return Math.round(rawMins / 15) * 15;
+    };
+
+    col.addEventListener("dragover", (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes("application/lightworx-task")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      col.style.outline = "2px solid var(--interactive-accent)";
+    });
+
+    col.addEventListener("dragleave", () => {
+      col.style.outline = "";
+    });
+
+    col.addEventListener("drop", (e: DragEvent) => {
+      col.style.outline = "";
+      const raw = e.dataTransfer?.getData("application/lightworx-task");
+      if (!raw) return;
+      e.preventDefault();
+
+      let task: any;
+      try { task = JSON.parse(raw); } catch { return; }
+
+      const dropMins = yToMins(e.clientY);
+      const duration = this.plugin.settings.defaultTaskDuration ?? 30;
+
+      const start = new Date(day);
+      start.setHours(startHour + Math.floor(dropMins / 60), dropMins % 60, 0, 0);
+      const end = new Date(start.getTime() + duration * 60 * 1000);
+
+      const defaultCalId =
+        this.plugin.settings.defaultCalendarId ||
+        this.plugin.settings.calendars.find((c) => c.enabled)?.id || "";
+
+      const stub: Partial<GCalEvent> = {
+        summary: task.title ?? "",
+        description: task.description ?? undefined,
+        start: { dateTime: start.toISOString() },
+        end:   { dateTime: end.toISOString() },
+        calendarId: defaultCalId,
+      };
+
+      new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
+        try {
+          const token = await this.getToken();
+          const created = await createEvent(token, calId, event);
+          const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+          new Notice("Event created from task.");
+          this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+          await this.renderThenRefresh();
+        } catch (err: any) {
+          new Notice("Failed to create event: " + err.message);
+        }
+      }).open();
+    });
+  }
+
+  // Add defaultTaskDuration to settings — calendar plugin uses this as the
+  // default event length when a task is dropped onto the grid.
+  // (Populated by the tasks plugin's calPlugin() integration.)
 
   // ── Drag-to-create ────────────────────────────────────────────────────────────
 
