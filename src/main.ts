@@ -1237,9 +1237,10 @@ class GCalView extends ItemView {
             new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
               try {
                 const token = await this.getToken();
-                await createEvent(token, calId, event);
+                const created = await createEvent(token, calId, event);
                 new Notice("Event created.");
-                this.loadAndRender();
+                this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+                await this.renderThenRefresh();
               } catch (err: any) {
                 new Notice("Failed to create event: " + err.message);
               }
@@ -1247,13 +1248,14 @@ class GCalView extends ItemView {
           } else {
             try {
               const token = await this.getToken();
-              await createEvent(token, defaultCalId, {
+              const created = await createEvent(token, defaultCalId, {
                 summary: title,
                 start: { dateTime: start.toISOString(), timeZone: tz },
                 end: { dateTime: end.toISOString(), timeZone: tz },
               });
               new Notice("Event created.");
-              this.loadAndRender();
+              this.addToCache({ ...created, calendarId: defaultCalId, calendarColor: calColor });
+              await this.renderThenRefresh();
             } catch (err: any) {
               new Notice("Failed to create event: " + err.message);
             }
@@ -1264,6 +1266,27 @@ class GCalView extends ItemView {
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     });
+  }
+
+  // ── Optimistic local mutations ────────────────────────────────────────────────
+
+  private addToCache(ev: GCalEvent) {
+    this.events = [...this.events, ev];
+  }
+
+  private updateInCache(id: string, calendarId: string, updated: Partial<GCalEvent>) {
+    this.events = this.events.map(e =>
+      e.id === id && e.calendarId === calendarId ? { ...e, ...updated } : e
+    );
+  }
+
+  private removeFromCache(id: string, calendarId: string) {
+    this.events = this.events.filter(e => !(e.id === id && e.calendarId === calendarId));
+  }
+
+  private async renderThenRefresh() {
+    await this.renderView();
+    this.fetchAndCache().then(() => this.renderView()).catch(console.warn);
   }
 
   // ── Modals ────────────────────────────────────────────────────────────────────
@@ -1283,18 +1306,17 @@ class GCalView extends ItemView {
     new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
       try {
         const token = await this.getToken();
-        await createEvent(token, calId, event);
+        const created = await createEvent(token, calId, event);
+        const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
         new Notice("Event created.");
-        this.loadAndRender();
+        this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+        await this.renderThenRefresh();
       } catch (err: any) {
         new Notice("Failed to create event: " + err.message);
       }
     }).open();
   }
 
-  // FIX (calendar change): use the events.move API when the user picks a
-  // different calendar, then update the event content on the new calendar.
-  // Previously calId was ignored and the PUT always targeted event.calendarId.
   openEditEventModal(event: GCalEvent) {
     new EventModal(
       this.app,
@@ -1304,14 +1326,17 @@ class GCalView extends ItemView {
         try {
           const token = await this.getToken();
           if (calId && calId !== event.calendarId) {
-            // Move to the new calendar first, then update content
             await moveEvent(token, event.calendarId, event.id, calId);
             await updateEvent(token, calId, event.id, updated);
+            const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+            this.removeFromCache(event.id, event.calendarId);
+            this.addToCache({ ...event, ...updated, id: event.id, calendarId: calId, calendarColor: calColor } as GCalEvent);
           } else {
             await updateEvent(token, event.calendarId, event.id, updated);
+            this.updateInCache(event.id, event.calendarId, updated);
           }
           new Notice("Event updated.");
-          this.loadAndRender();
+          await this.renderThenRefresh();
         } catch (err: any) {
           new Notice("Failed to update event: " + err.message);
         }
@@ -1321,7 +1346,8 @@ class GCalView extends ItemView {
           const token = await this.getToken();
           await deleteEvent(token, event.calendarId, event.id);
           new Notice("Event deleted.");
-          this.loadAndRender();
+          this.removeFromCache(event.id, event.calendarId);
+          await this.renderThenRefresh();
         } catch (err: any) {
           new Notice("Failed to delete event: " + err.message);
         }
