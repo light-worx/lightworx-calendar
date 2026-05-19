@@ -451,7 +451,7 @@ class GCalView extends ItemView {
 
   getViewType() { return VIEW_TYPE; }
   getDisplayText() { return "Timeblock plan"; }
-  getIcon() { return "calendar-days"; }
+  getIcon() { return "calendar-clock"; }
 
   // FIX (startup cache): load cached events instantly, render them, then
   // kick off a live refresh in the background and re-render when done.
@@ -1726,7 +1726,7 @@ export default class GCalTimeblockPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GCalView(leaf, this));
 
-    this.addRibbonIcon("calendar-days", "Open Timeblock plan", () => {
+    this.addRibbonIcon("calendar-clock", "Open Timeblock plan", () => {
       this.activateView();
     });
 
