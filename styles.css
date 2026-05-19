@@ -314,7 +314,7 @@
   padding: 2px 4px;
   font-size: 11px;
   overflow: hidden;
-  cursor: pointer;
+  cursor: grab;
   box-sizing: border-box;
   transition: filter 0.1s, transform 0.1s;
   backdrop-filter: blur(2px);
@@ -324,6 +324,27 @@
   filter: brightness(1.1);
   z-index: 10;
   transform: scale(1.01);
+}
+
+/* While being dragged, fade the original and change cursor */
+.gcal-event-dragging {
+  opacity: 0.35;
+  cursor: grabbing !important;
+  z-index: 1;
+  transform: none !important;
+  transition: none !important;
+}
+
+/* Ghost that follows the cursor during a move drag */
+.gcal-event-ghost {
+  position: absolute;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+  pointer-events: none;
+  z-index: 50;
+  box-sizing: border-box;
+  opacity: 0.85;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .gcal-event-title {
