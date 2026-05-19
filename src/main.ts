@@ -46,6 +46,7 @@ interface GCalSettings {
   startHour: number;
   endHour: number;
   defaultCalendarId: string;
+  defaultTaskDuration: number;
 }
 
 const DEFAULT_SETTINGS: GCalSettings = {
@@ -59,6 +60,7 @@ const DEFAULT_SETTINGS: GCalSettings = {
   startHour: 6,
   endHour: 22,
   defaultCalendarId: "",
+  defaultTaskDuration: 30,
 };
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -435,6 +437,9 @@ class GCalView extends ItemView {
   private viewMode: "day" | "week";
   private events: GCalEvent[] = [];
   private loading = false;
+  private hasScrolled = false;
+  private cachedWindowStart: Date | null = null;
+  private cachedWindowEnd:   Date | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: GCalTimeblockPlugin) {
     super(leaf);
@@ -454,9 +459,11 @@ class GCalView extends ItemView {
     const saved = await this.plugin.loadData();
     if (saved?.cachedEvents) {
       this.events = saved.cachedEvents;
+      if (saved.cachedWindowStart) this.cachedWindowStart = new Date(saved.cachedWindowStart);
+      if (saved.cachedWindowEnd)   this.cachedWindowEnd   = new Date(saved.cachedWindowEnd);
     }
     await this.renderView();
-    await this.loadAndRender();
+    this.fetchAndCache().then(() => this.renderView()).catch(console.warn);
   }
 
   async onClose() {}
@@ -515,6 +522,7 @@ class GCalView extends ItemView {
     todayBtn.onclick = () => {
       this.currentDate = new Date();
       this.currentDate.setHours(0, 0, 0, 0);
+      this.hasScrolled = false;
       this.loadAndRender();
     };
 
@@ -554,6 +562,7 @@ class GCalView extends ItemView {
     } else {
       this.currentDate.setDate(this.currentDate.getDate() + dir * 7);
     }
+    this.hasScrolled = false;
     this.loadAndRender();
   }
 
@@ -623,6 +632,7 @@ class GCalView extends ItemView {
 
     // Drag-to-create
     this.attachDragCreate(dayCol, scrollWrap, startHour, this.currentDate);
+    this.attachTaskDrop(dayCol, startHour, this.currentDate);
 
     // Render events
     const positioned = this.positionEvents(timedEvents, startHour, endHour);
@@ -641,11 +651,14 @@ class GCalView extends ItemView {
       }
     }
 
-    // Scroll to current time
-    setTimeout(() => {
-      const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
-      scrollWrap.scrollTop = scrollTo;
-    }, 50);
+    // Scroll to current time on first load only
+    if (!this.hasScrolled) {
+      setTimeout(() => {
+        const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
+        scrollWrap.scrollTop = scrollTo;
+        this.hasScrolled = true;
+      }, 50);
+    }
   }
 
   // ── Week view ─────────────────────────────────────────────────────────────────
@@ -728,6 +741,7 @@ class GCalView extends ItemView {
 
       // Drag-to-create
       this.attachDragCreate(dayCol, scrollWrap, startHour, day);
+      this.attachTaskDrop(dayCol, startHour, day);
 
       const timedEventsForDay = this.getEventsForDate(day).filter(
         (e) => !!e.start.dateTime
@@ -749,11 +763,14 @@ class GCalView extends ItemView {
       }
     });
 
-    setTimeout(() => {
-      const now = new Date();
-      const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
-      scrollWrap.scrollTop = scrollTo;
-    }, 50);
+    if (!this.hasScrolled) {
+      setTimeout(() => {
+        const now = new Date();
+        const scrollTo = Math.max(0, (now.getHours() - startHour - 1) * HOUR_HEIGHT);
+        scrollWrap.scrollTop = scrollTo;
+        this.hasScrolled = true;
+      }, 50);
+    }
   }
 
   // ── Event positioning ─────────────────────────────────────────────────────────
@@ -1061,54 +1078,124 @@ class GCalView extends ItemView {
     return this.plugin.settings.accessToken;
   }
 
+  private isCached(): boolean {
+    if (!this.cachedWindowStart || !this.cachedWindowEnd) return false;
+    if (this.viewMode === "day") {
+      return this.currentDate >= this.cachedWindowStart && this.currentDate < this.cachedWindowEnd;
+    } else {
+      const ws = startOfWeek(this.currentDate);
+      const we = new Date(ws); we.setDate(we.getDate() + 7);
+      return ws >= this.cachedWindowStart && we <= this.cachedWindowEnd;
+    }
+  }
+
   async loadAndRender() {
+    if (this.isCached()) {
+      await this.renderView();
+      this.fetchAndCache().then(() => this.renderView()).catch(console.warn);
+      return;
+    }
     this.loading = true;
     await this.renderView();
     this.loading = false;
+    await this.fetchAndCache();
+    await this.renderView();
+  }
 
+  async fetchAndCache() {
     try {
       const token = await this.getToken();
       const enabledCals = this.plugin.settings.calendars.filter((c) => c.enabled);
 
-      let timeMin: Date, timeMax: Date;
-      if (this.viewMode === "day") {
-        timeMin = new Date(this.currentDate);
-        timeMax = new Date(this.currentDate);
-        timeMax.setDate(timeMax.getDate() + 1);
-      } else {
-        timeMin = startOfWeek(this.currentDate);
-        timeMax = new Date(timeMin);
-        timeMax.setDate(timeMax.getDate() + 7);
-      }
+      const windowStart = new Date(); windowStart.setDate(windowStart.getDate() - 14); windowStart.setHours(0, 0, 0, 0);
+      const windowEnd   = new Date(); windowEnd.setDate(windowEnd.getDate() + 21);     windowEnd.setHours(0, 0, 0, 0);
 
       const allEvents: GCalEvent[] = [];
       for (const cal of enabledCals) {
         try {
-          const evts = await fetchEvents(
-            token,
-            cal.id,
-            cal.color,
-            timeMin.toISOString(),
-            timeMax.toISOString()
-          );
-          allEvents.push(...evts);
+          allEvents.push(...await fetchEvents(token, cal.id, cal.color, windowStart.toISOString(), windowEnd.toISOString()));
         } catch (err) {
           console.warn(`Failed to fetch ${cal.name}:`, err);
         }
       }
-      this.events = allEvents;
 
-      // FIX (startup cache): persist fetched events so they're available
-      // immediately on the next startup before the network responds.
+      this.events            = allEvents;
+      this.cachedWindowStart = windowStart;
+      this.cachedWindowEnd   = windowEnd;
+
       const saved = await this.plugin.loadData() ?? {};
-      await this.plugin.saveData({ ...saved, cachedEvents: allEvents });
-
+      await this.plugin.saveData({
+        ...saved,
+        cachedEvents:      allEvents,
+        cachedWindowStart: windowStart.toISOString(),
+        cachedWindowEnd:   windowEnd.toISOString(),
+      });
     } catch (err: any) {
       new Notice("Failed to load events: " + err.message);
     }
+  }
 
-    this.loading = false;
-    await this.renderView();
+  // ── Drop tasks from the Tasks plugin ─────────────────────────────────────────
+
+  attachTaskDrop(col: HTMLElement, startHour: number, day: Date) {
+    const yToMins = (clientY: number): number => {
+      const rect = col.getBoundingClientRect();
+      const relY = clientY - rect.top;
+      return Math.round((relY / HOUR_HEIGHT) * 60 / 15) * 15;
+    };
+
+    col.addEventListener("dragover", (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes("application/lightworx-task")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      col.style.outline = "2px solid var(--interactive-accent)";
+    });
+
+    col.addEventListener("dragleave", () => {
+      col.style.outline = "";
+    });
+
+    col.addEventListener("drop", (e: DragEvent) => {
+      col.style.outline = "";
+      const raw = e.dataTransfer?.getData("application/lightworx-task");
+      if (!raw) return;
+      e.preventDefault();
+
+      let task: any;
+      try { task = JSON.parse(raw); } catch { return; }
+
+      const dropMins = yToMins(e.clientY);
+      const duration = this.plugin.settings.defaultTaskDuration ?? 30;
+
+      const start = new Date(day);
+      start.setHours(startHour + Math.floor(dropMins / 60), dropMins % 60, 0, 0);
+      const end = new Date(start.getTime() + duration * 60 * 1000);
+
+      const defaultCalId =
+        this.plugin.settings.defaultCalendarId ||
+        this.plugin.settings.calendars.find((c) => c.enabled)?.id || "";
+
+      const stub: Partial<GCalEvent> = {
+        summary: task.title ?? "",
+        description: task.description ?? undefined,
+        start: { dateTime: start.toISOString() },
+        end:   { dateTime: end.toISOString() },
+        calendarId: defaultCalId,
+      };
+
+      new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
+        try {
+          const token = await this.getToken();
+          const created = await createEvent(token, calId, event);
+          const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+          new Notice("Event created from task.");
+          this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+          await this.renderThenRefresh();
+        } catch (err: any) {
+          new Notice("Failed to create event: " + err.message);
+        }
+      }).open();
+    });
   }
 
   // ── Drag-to-create ────────────────────────────────────────────────────────────
