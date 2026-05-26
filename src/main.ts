@@ -450,8 +450,8 @@ class GCalView extends ItemView {
   }
 
   getViewType() { return VIEW_TYPE; }
-  getDisplayText() { return "Timeblock plan"; }
-  getIcon() { return "calendar-clock"; }
+  getDisplayText() { return "GCal Timeblock"; }
+  getIcon() { return "calendar-days"; }
 
   // FIX (startup cache): load cached events instantly, render them, then
   // kick off a live refresh in the background and re-render when done.
@@ -1123,9 +1123,10 @@ class GCalView extends ItemView {
       this.cachedWindowStart = windowStart;
       this.cachedWindowEnd   = windowEnd;
 
-      const saved = await this.plugin.loadData() ?? {};
+      // Persist cache alongside settings (saveSettings already strips accessToken/tokenExpiry)
+      const { accessToken, tokenExpiry, ...persist } = this.plugin.settings;
       await this.plugin.saveData({
-        ...saved,
+        ...persist,
         cachedEvents:      allEvents,
         cachedWindowStart: windowStart.toISOString(),
         cachedWindowEnd:   windowEnd.toISOString(),
@@ -1155,7 +1156,7 @@ class GCalView extends ItemView {
       col.style.outline = "";
     });
 
-    col.addEventListener("drop", async (e: DragEvent) => {
+    col.addEventListener("drop", (e: DragEvent) => {
       col.style.outline = "";
       const raw = e.dataTransfer?.getData("application/lightworx-task");
       if (!raw) return;
@@ -1183,23 +1184,18 @@ class GCalView extends ItemView {
         calendarId: defaultCalId,
       };
 
-      // Create immediately — no modal, same as the quick-event drag-on-grid flow.
-      const tz = localTimeZone();
-      try {
-        const token = await this.getToken();
-        const created = await createEvent(token, defaultCalId, {
-          summary: task.title ?? "",
-          description: task.description ?? undefined,
-          start: { dateTime: start.toISOString(), timeZone: tz },
-          end:   { dateTime: end.toISOString(),   timeZone: tz },
-        });
-        const calColor = this.plugin.settings.calendars.find(c => c.id === defaultCalId)?.color || "#4285F4";
-        new Notice(`📅 "${task.title}" added to calendar`);
-        this.addToCache({ ...created, calendarId: defaultCalId, calendarColor: calColor });
-        await this.renderThenRefresh();
-      } catch (err: any) {
-        new Notice("Failed to create event: " + err.message);
-      }
+      new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
+        try {
+          const token = await this.getToken();
+          const created = await createEvent(token, calId, event);
+          const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+          new Notice("Event created from task.");
+          this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+          await this.renderThenRefresh();
+        } catch (err: any) {
+          new Notice("Failed to create event: " + err.message);
+        }
+      }).open();
     });
   }
 
@@ -1461,7 +1457,7 @@ class GCalSettingsTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Timeblock plan Settings" });
+    containerEl.createEl("h2", { text: "GCal Timeblock Settings" });
 
     // OAuth setup guide
     const guide = containerEl.createEl("details", { cls: "gcal-settings-guide" });
@@ -1726,13 +1722,13 @@ export default class GCalTimeblockPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GCalView(leaf, this));
 
-    this.addRibbonIcon("calendar-clock", "Open Timeblock plan", () => {
+    this.addRibbonIcon("calendar-days", "Open GCal Timeblock", () => {
       this.activateView();
     });
 
     this.addCommand({
       id: "open-gcal-timeblock",
-      name: "Open Timeblock plan Panel",
+      name: "Open GCal Timeblock Panel",
       callback: () => this.activateView(),
     });
 
@@ -1757,11 +1753,17 @@ export default class GCalTimeblockPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const stored = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, stored);
+    // Never use a persisted access token — always refresh on startup
+    this.settings.accessToken = "";
+    this.settings.tokenExpiry = 0;
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    // Never persist the access token — it expires and causes 400s on next startup
+    const { accessToken, tokenExpiry, ...persist } = this.settings;
+    await this.saveData(persist);
   }
 
   async activateView() {
