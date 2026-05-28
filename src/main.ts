@@ -1156,7 +1156,7 @@ class GCalView extends ItemView {
       col.style.outline = "";
     });
 
-    col.addEventListener("drop", (e: DragEvent) => {
+    col.addEventListener("drop", async (e: DragEvent) => {
       col.style.outline = "";
       const raw = e.dataTransfer?.getData("application/lightworx-task");
       if (!raw) return;
@@ -1176,26 +1176,22 @@ class GCalView extends ItemView {
         this.plugin.settings.defaultCalendarId ||
         this.plugin.settings.calendars.find((c) => c.enabled)?.id || "";
 
-      const stub: Partial<GCalEvent> = {
-        summary: task.title ?? "",
-        description: task.description ?? undefined,
-        start: { dateTime: start.toISOString() },
-        end:   { dateTime: end.toISOString() },
-        calendarId: defaultCalId,
-      };
-
-      new EventModal(this.app, stub, this.plugin.settings.calendars, async (event, calId) => {
-        try {
-          const token = await this.getToken();
-          const created = await createEvent(token, calId, event);
-          const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
-          new Notice("Event created from task.");
-          this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
-          await this.renderThenRefresh();
-        } catch (err: any) {
-          new Notice("Failed to create event: " + err.message);
-        }
-      }).open();
+      const tz = localTimeZone();
+      try {
+        const token = await this.getToken();
+        const created = await createEvent(token, defaultCalId, {
+          summary: task.title ?? "",
+          description: task.description ?? undefined,
+          start: { dateTime: start.toISOString(), timeZone: tz },
+          end:   { dateTime: end.toISOString(),   timeZone: tz },
+        });
+        const calColor = this.plugin.settings.calendars.find(c => c.id === defaultCalId)?.color || "#4285F4";
+        new Notice(`Added "${task.title}" to calendar.`);
+        this.addToCache({ ...created, calendarId: defaultCalId, calendarColor: calColor });
+        await this.renderThenRefresh();
+      } catch (err: any) {
+        new Notice("Failed to create event: " + err.message);
+      }
     });
   }
 
