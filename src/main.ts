@@ -450,7 +450,7 @@ class GCalView extends ItemView {
   }
 
   getViewType() { return VIEW_TYPE; }
-  getDisplayText() { return "GCal Timeblock"; }
+  getDisplayText() { return "Timeblock Planner"; }
   getIcon() { return "calendar-days"; }
 
   // FIX (startup cache): load cached events instantly, render them, then
@@ -1145,19 +1145,61 @@ class GCalView extends ItemView {
       return Math.round((relY / HOUR_HEIGHT) * 60 / 15) * 15;
     };
 
+    const minsToTop = (mins: number) => (mins / 60) * HOUR_HEIGHT;
+
+    const fmt = (h: number, m: number) => {
+      const ampm = h < 12 ? "AM" : "PM";
+      return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${ampm}`;
+    };
+
+    // Guide elements — created once, shown/hidden on dragover/dragleave
+    let guideLine: HTMLElement | null = null;
+    let guideLabel: HTMLElement | null = null;
+    let guideBlock: HTMLElement | null = null;
+
+    const showGuide = (clientY: number) => {
+      const sMins = yToMins(clientY);
+      const dur   = this.plugin.settings.defaultTaskDuration ?? 30;
+      const eMins = sMins + dur;
+      const topPx = minsToTop(sMins);
+
+      if (!guideLine) {
+        guideLine  = col.createDiv({ cls: "gcal-task-guide-line" });
+        guideLabel = col.createDiv({ cls: "gcal-task-guide-label" });
+        guideBlock = col.createDiv({ cls: "gcal-task-guide-block" });
+      }
+
+      guideLine.style.top  = `${topPx}px`;
+      guideLabel.style.top = `${topPx - 15}px`;
+
+      const sH = startHour + Math.floor(sMins / 60), sM = sMins % 60;
+      const eH = startHour + Math.floor(eMins / 60), eM = eMins % 60;
+      guideLabel.setText(`${fmt(sH, sM)} – ${fmt(eH, eM)}`);
+
+      guideBlock.style.top    = `${topPx}px`;
+      guideBlock.style.height = `${minsToTop(dur)}px`;
+    };
+
+    const hideGuide = () => {
+      guideLine?.remove();  guideLine  = null;
+      guideLabel?.remove(); guideLabel = null;
+      guideBlock?.remove(); guideBlock = null;
+    };
+
     col.addEventListener("dragover", (e: DragEvent) => {
       if (!e.dataTransfer?.types.includes("application/lightworx-task")) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
-      col.style.outline = "2px solid var(--interactive-accent)";
+      showGuide(e.clientY);
     });
 
-    col.addEventListener("dragleave", () => {
-      col.style.outline = "";
+    col.addEventListener("dragleave", (e: DragEvent) => {
+      // Only hide if we've actually left this column (not just entered a child)
+      if (!col.contains(e.relatedTarget as Node)) hideGuide();
     });
 
     col.addEventListener("drop", async (e: DragEvent) => {
-      col.style.outline = "";
+      hideGuide();
       const raw = e.dataTransfer?.getData("application/lightworx-task");
       if (!raw) return;
       e.preventDefault();
@@ -1453,7 +1495,7 @@ class GCalSettingsTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "GCal Timeblock Settings" });
+    containerEl.createEl("h2", { text: "Timeblock Planner Settings" });
 
     // OAuth setup guide
     const guide = containerEl.createEl("details", { cls: "gcal-settings-guide" });
@@ -1718,13 +1760,13 @@ export default class GCalTimeblockPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GCalView(leaf, this));
 
-    this.addRibbonIcon("calendar-days", "Open GCal Timeblock", () => {
+    this.addRibbonIcon("calendar-days", "Open Timeblock Planner", () => {
       this.activateView();
     });
 
     this.addCommand({
       id: "open-gcal-timeblock",
-      name: "Open GCal Timeblock Panel",
+      name: "Open Timeblock Planner",
       callback: () => this.activateView(),
     });
 
