@@ -1193,19 +1193,14 @@ class GCalView extends ItemView {
 // URL, waits for the redirect, resolves with { code, port }, then shuts down.
 
 function startLocalAuthServer(clientId: string): Promise<{ code: string; port: number }> {
+  const PORT = 42831; // fixed — must match the URI registered in Google Cloud Console
+
   return new Promise((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const http = require("http") as typeof import("http");
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const net  = require("net")  as typeof import("net");
-
-    const finder = net.createServer();
-    finder.listen(0, "127.0.0.1", () => {
-      const port = (finder.address() as { port: number }).port;
-      finder.close(() => {
 
         const server = http.createServer((req: any, res: any) => {
-          const url    = new URL(req.url ?? "/", `http://localhost:${port}`);
+          const url    = new URL(req.url ?? "/", `http://localhost:${PORT}`);
           const code   = url.searchParams.get("code");
           const errMsg = url.searchParams.get("error");
 
@@ -1227,7 +1222,7 @@ p{margin:0;color:#666;font-size:14px}</style></head>
             res.writeHead(200, { "Content-Type": "text/html" });
             res.end(html("Timeblock Planner is now connected to Google Calendar.", true));
             server.close();
-            resolve({ code, port });
+            resolve({ code, port: PORT });
           } else {
             res.writeHead(400, { "Content-Type": "text/html" });
             res.end(html(errMsg ?? "Something went wrong.", false));
@@ -1236,11 +1231,19 @@ p{margin:0;color:#666;font-size:14px}</style></head>
           }
         });
 
-        server.listen(port, "127.0.0.1", () => {
+        server.on("error", (err: any) => {
+          if (err.code === "EADDRINUSE") {
+            reject(new Error(`Port ${PORT} is already in use. Close any other apps using it and try again.`));
+          } else {
+            reject(err);
+          }
+        });
+
+        server.listen(PORT, "127.0.0.1", () => {
           const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" +
             new URLSearchParams({
               client_id:     clientId,
-              redirect_uri:  `http://localhost:${port}`,
+              redirect_uri:  `http://localhost:${PORT}`,
               response_type: "code",
               scope:         "https://www.googleapis.com/auth/calendar",
               access_type:   "offline",
@@ -1254,8 +1257,6 @@ p{margin:0;color:#666;font-size:14px}</style></head>
           reject(new Error("Timed out after 5 minutes. Please try again."));
         }, 5 * 60 * 1000);
         server.on("close", () => clearTimeout(timer));
-      });
-    });
   });
 }
 
