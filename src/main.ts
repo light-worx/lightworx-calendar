@@ -445,7 +445,7 @@ class GCalView extends ItemView {
   }
 
   getViewType() { return VIEW_TYPE; }
-  getDisplayText() { return "Time-block Planner"; }
+  getDisplayText() { return "GCal Timeblock"; }
   getIcon() { return "calendar-days"; }
 
   // FIX (startup cache): load cached events instantly, render them, then
@@ -1273,7 +1273,7 @@ class GCalSettingsTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Time-block Planner Settings" });
+    containerEl.createEl("h2", { text: "GCal Timeblock Settings" });
 
     // OAuth setup guide
     const guide = containerEl.createEl("details", { cls: "gcal-settings-guide" });
@@ -1498,13 +1498,13 @@ export default class GCalTimeblockPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GCalView(leaf, this));
 
-    this.addRibbonIcon("calendar-days", "Open Time-block Planner", () => {
+    this.addRibbonIcon("calendar-days", "Open GCal Timeblock", () => {
       this.activateView();
     });
 
     this.addCommand({
       id: "open-gcal-timeblock",
-      name: "Open Time-block Planner Panel",
+      name: "Open GCal Timeblock Panel",
       callback: () => this.activateView(),
     });
 
