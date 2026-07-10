@@ -713,3 +713,28 @@
 .gcal-guide-body a {
   color: var(--interactive-accent);
 }
+
+/* ─── Drag-to-move ────────────────────────────────────────────────────────── */
+
+.gcal-event {
+  cursor: grab;
+}
+
+.gcal-event-dragging {
+  opacity: 0.35;
+  cursor: grabbing !important;
+  z-index: 1;
+  transform: none !important;
+  transition: none !important;
+}
+
+.gcal-event-ghost {
+  position: absolute;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+  pointer-events: none;
+  z-index: 50;
+  box-sizing: border-box;
+  opacity: 0.85;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}

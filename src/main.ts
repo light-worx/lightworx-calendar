@@ -595,6 +595,8 @@ class GCalView extends ItemView {
     // Time gutter + day column
     const timeGutter = grid.createDiv({ cls: "gcal-time-gutter" });
     const dayCol = grid.createDiv({ cls: "gcal-day-col" });
+    dayCol.dataset.startHour = String(startHour);
+    dayCol.dataset.day = dateKey(this.currentDate);
 
     const totalHours = endHour - startHour;
     grid.style.height = `${totalHours * HOUR_HEIGHT}px`;
@@ -711,6 +713,8 @@ class GCalView extends ItemView {
       const dayCol = grid.createDiv({
         cls: `gcal-day-col gcal-week-col ${dateKey(day) === today ? "today-col" : ""}`,
       });
+      dayCol.dataset.startHour = String(startHour);
+      dayCol.dataset.day = dateKey(day);
 
       for (let h = startHour; h <= endHour; h++) {
         const y = (h - startHour) * HOUR_HEIGHT;
@@ -841,44 +845,146 @@ class GCalView extends ItemView {
       el.createEl("span", { cls: "gcal-event-title gcal-event-title-sm", text: event.summary || "(No title)" });
     }
 
-    el.onclick = (e) => {
-      e.stopPropagation();
-      this.openEditEventModal(event);
-    };
-
     // Drag to resize (bottom handle)
     if (height > 24) {
       const resizeHandle = el.createDiv({ cls: "gcal-resize-handle" });
       resizeHandle.addEventListener("mousedown", (e) => {
         e.stopPropagation();
-        this.startResize(e, event, el, col, top);
+        let moved = false;
+        const trackMove = () => { moved = true; };
+        const trackUp = () => {
+          document.removeEventListener("mousemove", trackMove);
+          document.removeEventListener("mouseup", trackUp);
+          if (moved) el.addEventListener("click", (ce) => ce.stopPropagation(), { capture: true, once: true });
+        };
+        document.addEventListener("mousemove", trackMove);
+        document.addEventListener("mouseup", trackUp);
+        this.startResize(e, event, el);
       });
     }
+
+    // ── Drag-to-move ──────────────────────────────────────────────────────────
+    el.addEventListener("mousedown", (e) => {
+      if ((e.target as HTMLElement).closest(".gcal-resize-handle")) return;
+      if (e.button !== 0) return;
+      e.stopPropagation();
+
+      const startX = e.clientX, startY = e.clientY;
+      let dragging = false;
+      let ghost: HTMLElement | null = null;
+      let startLbl: HTMLElement | null = null;
+      let endLbl: HTMLElement | null = null;
+
+      const colStartHour = parseInt(col.dataset.startHour ?? "0");
+      const durMs = event.end.dateTime && event.start.dateTime
+        ? new Date(event.end.dateTime).getTime() - new Date(event.start.dateTime).getTime()
+        : 60 * 60 * 1000;
+      const durMins = durMs / 60000;
+
+      const snap = (clientY: number, targetCol: HTMLElement): number => {
+        const rect = targetCol.getBoundingClientRect();
+        return Math.round(((clientY - rect.top) / HOUR_HEIGHT) * 60 / 15) * 15;
+      };
+
+      const fmt = (h: number, m: number) => {
+        const ampm = h < 12 ? "AM" : "PM";
+        return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${ampm}`;
+      };
+
+      const onMove = (me: MouseEvent) => {
+        if (!dragging) {
+          if (Math.abs(me.clientY - startY) < 4 && Math.abs(me.clientX - startX) < 4) return;
+          dragging = true;
+          el.classList.add("gcal-event-dragging");
+          const targetCol = this.colAtPoint(me.clientX, me.clientY) ?? col;
+          ghost = targetCol.createDiv({ cls: "gcal-event-ghost" });
+          startLbl = targetCol.createDiv({ cls: "gcal-drag-start-label" });
+          endLbl = targetCol.createDiv({ cls: "gcal-drag-end-label" });
+          ghost.style.height = `${height}px`;
+          ghost.style.left = el.style.left;
+          ghost.style.width = el.style.width;
+          ghost.style.backgroundColor = event.calendarColor + "55";
+          ghost.style.borderLeftColor = event.calendarColor;
+        }
+        if (!ghost || !startLbl || !endLbl) return;
+        const targetCol = this.colAtPoint(me.clientX, me.clientY) ?? col;
+        if (ghost.parentElement !== targetCol) {
+          targetCol.appendChild(ghost);
+          targetCol.appendChild(startLbl);
+          targetCol.appendChild(endLbl);
+        }
+        const sh = parseInt(targetCol.dataset.startHour ?? "0");
+        const sMins = snap(me.clientY, targetCol);
+        const eMins = sMins + durMins;
+        const topPx = (sMins / 60) * HOUR_HEIGHT;
+        ghost.style.top = `${topPx}px`;
+        startLbl.style.top = `${topPx - 14}px`;
+        endLbl.style.top = `${topPx + height + 2}px`;
+        startLbl.setText(fmt(sh + Math.floor(sMins / 60), sMins % 60));
+        endLbl.setText(fmt(sh + Math.floor(eMins / 60), eMins % 60));
+      };
+
+      const onUp = async (me: MouseEvent) => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        ghost?.remove(); ghost = null;
+        startLbl?.remove(); startLbl = null;
+        endLbl?.remove(); endLbl = null;
+        el.classList.remove("gcal-event-dragging");
+
+        if (!dragging) {
+          this.openEditEventModal(event);
+          return;
+        }
+
+        const targetCol = this.colAtPoint(me.clientX, me.clientY) ?? col;
+        const sh = parseInt(targetCol.dataset.startHour ?? "0");
+        const dayIso = targetCol.dataset.day ?? dateKey(this.currentDate);
+        const sMins = snap(me.clientY, targetCol);
+        const [y, mo, d] = dayIso.split("-").map(Number);
+        const newStart = new Date(y, mo - 1, d, sh + Math.floor(sMins / 60), sMins % 60, 0, 0);
+        const newEnd = new Date(newStart.getTime() + durMs);
+        const tz = localTimeZone();
+        try {
+          const token = await this.getToken();
+          await updateEvent(token, event.calendarId, event.id, {
+            ...event,
+            start: { dateTime: newStart.toISOString(), timeZone: tz },
+            end: { dateTime: newEnd.toISOString(), timeZone: tz },
+          });
+          new Notice("Event moved.");
+          this.loadAndRender();
+        } catch (err: any) {
+          new Notice("Failed to move event: " + err.message);
+        }
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
   }
 
-  startResize(e: MouseEvent, event: GCalEvent, el: HTMLElement, col: HTMLElement, origTop: number) {
+  startResize(e: MouseEvent, event: GCalEvent, el: HTMLElement) {
     const startY = e.clientY;
     const origHeight = el.offsetHeight;
 
     const onMove = (me: MouseEvent) => {
-      const delta = me.clientY - startY;
-      const newHeight = Math.max(20, origHeight + delta);
-      el.style.height = `${newHeight}px`;
+      el.style.height = `${Math.max(20, origHeight + me.clientY - startY)}px`;
     };
 
     const onUp = async (me: MouseEvent) => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
-      const delta = me.clientY - startY;
-      const newHeight = Math.max(20, origHeight + delta);
+      const newHeight = Math.max(20, origHeight + me.clientY - startY);
       const addedMins = Math.round(((newHeight - origHeight) / HOUR_HEIGHT) * 60 / 15) * 15;
       if (!event.end.dateTime) return;
       const newEnd = new Date(new Date(event.end.dateTime).getTime() + addedMins * 60 * 1000);
+      const tz = localTimeZone();
       try {
         const token = await this.getToken();
         await updateEvent(token, event.calendarId, event.id, {
           ...event,
-          end: { dateTime: newEnd.toISOString() },
+          end: { dateTime: newEnd.toISOString(), timeZone: tz },
         });
         new Notice("Event updated.");
         this.loadAndRender();
@@ -889,6 +995,11 @@ class GCalView extends ItemView {
 
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+  }
+
+  private colAtPoint(x: number, y: number): HTMLElement | null {
+    const els = Array.from(document.elementsFromPoint(x, y)) as HTMLElement[];
+    return els.find(el => el.classList.contains("gcal-day-col")) ?? null;
   }
 
   // ── Event helpers ─────────────────────────────────────────────────────────────
@@ -1187,79 +1298,6 @@ class GCalView extends ItemView {
   }
 }
 
-
-// ─── Local OAuth server ───────────────────────────────────────────────────────
-// Starts a temporary HTTP server on a random free port, opens the Google auth
-// URL, waits for the redirect, resolves with { code, port }, then shuts down.
-
-function startLocalAuthServer(clientId: string): Promise<{ code: string; port: number }> {
-  const PORT = 42831; // fixed — must match the URI registered in Google Cloud Console
-
-  return new Promise((resolve, reject) => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const http = require("http") as typeof import("http");
-
-        const server = http.createServer((req: any, res: any) => {
-          const url    = new URL(req.url ?? "/", `http://localhost:${PORT}`);
-          const code   = url.searchParams.get("code");
-          const errMsg = url.searchParams.get("error");
-
-          const html = (msg: string, ok: boolean) => `<!DOCTYPE html><html>
-<head><title>Timeblock Planner</title>
-<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;
-justify-content:center;height:100vh;margin:0;background:#f0f4f8}
-.box{background:#fff;padding:40px 48px;border-radius:16px;text-align:center;
-box-shadow:0 4px 24px rgba(0,0,0,.10)}
-h2{margin:0 0 12px;color:${ok ? "#2e7d32" : "#c62828"}}
-p{margin:0;color:#666;font-size:14px}</style></head>
-<body><div class="box">
-<h2>${ok ? "✓ Authorised!" : "✗ Error"}</h2>
-<p>${msg}</p>
-<p style="margin-top:12px;color:#aaa;font-size:12px">You can close this tab and return to Obsidian.</p>
-</div></body></html>`;
-
-          if (code) {
-            res.writeHead(200, { "Content-Type": "text/html" });
-            res.end(html("Timeblock Planner is now connected to Google Calendar.", true));
-            server.close();
-            resolve({ code, port: PORT });
-          } else {
-            res.writeHead(400, { "Content-Type": "text/html" });
-            res.end(html(errMsg ?? "Something went wrong.", false));
-            server.close();
-            reject(new Error(errMsg ?? "Auth cancelled"));
-          }
-        });
-
-        server.on("error", (err: any) => {
-          if (err.code === "EADDRINUSE") {
-            reject(new Error(`Port ${PORT} is already in use. Close any other apps using it and try again.`));
-          } else {
-            reject(err);
-          }
-        });
-
-        server.listen(PORT, "127.0.0.1", () => {
-          const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?" +
-            new URLSearchParams({
-              client_id:     clientId,
-              redirect_uri:  `http://localhost:${PORT}`,
-              response_type: "code",
-              scope:         "https://www.googleapis.com/auth/calendar",
-              access_type:   "offline",
-              prompt:        "consent",
-            }).toString();
-          window.open(authUrl, "_blank");
-        });
-
-        const timer = setTimeout(() => {
-          server.close();
-          reject(new Error("Timed out after 5 minutes. Please try again."));
-        }, 5 * 60 * 1000);
-        server.on("close", () => clearTimeout(timer));
-  });
-}
-
 // ─── Settings Tab ─────────────────────────────────────────────────────────────
 
 class GCalSettingsTab extends PluginSettingTab {
@@ -1281,12 +1319,12 @@ class GCalSettingsTab extends PluginSettingTab {
     const guideBody = guide.createDiv({ cls: "gcal-guide-body" });
     guideBody.createEl("ol").innerHTML = `
       <li>Go to <a href="https://console.cloud.google.com/">Google Cloud Console</a></li>
-      <li>Create a project and enable the <strong>Google Calendar API</strong></li>
+      <li>Create a new project (or select existing)</li>
+      <li>Enable the <strong>Google Calendar API</strong></li>
       <li>Go to <strong>APIs &amp; Services → Credentials</strong></li>
-      <li>Create an <strong>OAuth 2.0 Client ID</strong> — choose <strong>Web application</strong></li>
-      <li>Under <strong>Authorised redirect URIs</strong> add <code>http://localhost</code></li>
+      <li>Create an <strong>OAuth 2.0 Client ID</strong> (Desktop app type)</li>
       <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> into the fields below</li>
-      <li>Click <strong>Sign in with Google</strong> — approve access in your browser</li>
+      <li>Click <strong>Open Auth URL</strong>, grant access, paste the code into Step 2, click Exchange</li>
       <li>Click <strong>Load Calendars</strong> to finish</li>
     `;
 
@@ -1336,46 +1374,86 @@ class GCalSettingsTab extends PluginSettingTab {
           });
       });
 
-    // ── OAuth via localhost redirect ───────────────────────────────────────────
+    // ── Step 1: Open Auth URL ──────────────────────────────────────────────────
     new Setting(containerEl)
-      .setName("Connect Google Account")
-      .setDesc("Opens Google sign-in in your browser. The plugin catches the auth code automatically — no copy-pasting needed.")
+      .setName("Step 1 — Open Google Auth")
+      .setDesc("Click to open the Google consent screen in your browser. Grant access, then copy the authorisation code shown.")
       .addButton((btn) =>
-        btn.setButtonText("Sign in with Google").setCta().onClick(async () => {
+        btn.setButtonText("Open Auth URL").setCta().onClick(() => {
           if (!this.plugin.settings.clientId) {
-            new Notice("Enter your Client ID first."); return;
+            new Notice("Enter your Client ID first.");
+            return;
           }
           if (!this.plugin.settings.clientSecret) {
-            new Notice("Enter your Client Secret first."); return;
+            new Notice("Enter your Client Secret first.");
+            return;
           }
-          btn.setButtonText("Waiting for browser…").setDisabled(true);
-          new Notice("Browser opened — sign in and approve access.", 8000);
+          const authUrl =
+            `https://accounts.google.com/o/oauth2/v2/auth?` +
+            new URLSearchParams({
+              client_id: this.plugin.settings.clientId,
+              redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
+              response_type: "code",
+              scope: "https://www.googleapis.com/auth/calendar",
+              access_type: "offline",
+              prompt: "consent",
+            }).toString();
+          window.open(authUrl, "_blank");
+          // Show the code input section
+          codeSection.style.display = "block";
+          new Notice("Browser opened — grant access, then paste the code below.", 6000);
+        })
+      );
+
+    // ── Step 2: Paste auth code ────────────────────────────────────────────────
+    const codeSection = containerEl.createDiv({ cls: "gcal-code-section" });
+    codeSection.style.display = this.plugin.settings.refreshToken ? "none" : "block";
+
+    let authCode = "";
+
+    new Setting(codeSection)
+      .setName("Step 2 — Paste Authorisation Code")
+      .setDesc("Paste the code Google gave you after granting permission, then click Exchange.")
+      .addText((text) => {
+        text.setPlaceholder("4/0AX4XfWh…").onChange((v) => {
+          authCode = v.trim();
+        });
+        text.inputEl.style.width = "260px";
+      })
+      .addButton((btn) =>
+        btn.setButtonText("Exchange for Token").onClick(async () => {
+          if (!authCode) {
+            new Notice("Paste the authorisation code first.");
+            return;
+          }
+          btn.setButtonText("Exchanging…").setDisabled(true);
           try {
-            const { code, port } = await startLocalAuthServer(this.plugin.settings.clientId);
             const resp = await requestUrl({
               url: "https://oauth2.googleapis.com/token",
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({
-                client_id:     this.plugin.settings.clientId,
+                client_id: this.plugin.settings.clientId,
                 client_secret: this.plugin.settings.clientSecret,
-                code,
-                grant_type:    "authorization_code",
-                redirect_uri:  `http://localhost:${port}`,
+                code: authCode,
+                grant_type: "authorization_code",
+                redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
               }).toString(),
             });
             const data = resp.json;
-            if (data.error) throw new Error(data.error_description || data.error);
+            if (data.error) {
+              throw new Error(data.error_description || data.error);
+            }
             this.plugin.settings.refreshToken = data.refresh_token;
-            this.plugin.settings.accessToken  = data.access_token;
-            this.plugin.settings.tokenExpiry  = Date.now() + (data.expires_in ?? 3600) * 1000;
+            this.plugin.settings.accessToken = data.access_token;
+            this.plugin.settings.tokenExpiry = Date.now() + (data.expires_in || 3600) * 1000;
             await this.plugin.saveSettings();
-            new Notice("✅ Connected! Now click Load Calendars.", 8000);
-            this.display();
+            new Notice("✅ Authenticated! Now click 'Load Calendars'.", 8000);
+            codeSection.style.display = "none";
+            this.display(); // re-render to show the refresh token field populated
           } catch (err: any) {
-            new Notice("Auth failed: " + err.message, 10000);
-          } finally {
-            btn.setButtonText("Sign in with Google").setDisabled(false);
+            new Notice("Token exchange failed: " + err.message, 8000);
+            btn.setButtonText("Exchange for Token").setDisabled(false);
           }
         })
       );
