@@ -46,6 +46,7 @@ interface GCalSettings {
   startHour: number;
   endHour: number;
   defaultCalendarId: string;
+  defaultTaskDuration: number;
 }
 
 const DEFAULT_SETTINGS: GCalSettings = {
@@ -59,6 +60,7 @@ const DEFAULT_SETTINGS: GCalSettings = {
   startHour: 6,
   endHour: 22,
   defaultCalendarId: "",
+  defaultTaskDuration: 30,
 };
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -623,6 +625,7 @@ class GCalView extends ItemView {
 
     // Drag-to-create
     this.attachDragCreate(dayCol, scrollWrap, startHour, this.currentDate);
+    this.attachTaskDrop(dayCol, startHour, this.currentDate);
 
     // Render events
     const positioned = this.positionEvents(timedEvents, startHour, endHour);
@@ -728,6 +731,7 @@ class GCalView extends ItemView {
 
       // Drag-to-create
       this.attachDragCreate(dayCol, scrollWrap, startHour, day);
+      this.attachTaskDrop(dayCol, startHour, day);
 
       const timedEventsForDay = this.getEventsForDate(day).filter(
         (e) => !!e.start.dateTime
@@ -1077,6 +1081,103 @@ class GCalView extends ItemView {
 
     this.loading = false;
     await this.renderView();
+  }
+
+  // ── Drop tasks from the Tasks plugin ─────────────────────────────────────────
+
+  attachTaskDrop(col: HTMLElement, startHour: number, day: Date) {
+    const yToMins = (clientY: number): number => {
+      const rect = col.getBoundingClientRect();
+      const relY = clientY - rect.top;
+      return Math.round((relY / HOUR_HEIGHT) * 60 / 15) * 15;
+    };
+
+    const minsToTop = (mins: number) => (mins / 60) * HOUR_HEIGHT;
+
+    const fmt = (h: number, m: number) => {
+      const ampm = h < 12 ? "AM" : "PM";
+      return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${ampm}`;
+    };
+
+    let guideLine: HTMLElement | null = null;
+    let guideLabel: HTMLElement | null = null;
+    let guideBlock: HTMLElement | null = null;
+
+    const showGuide = (clientY: number) => {
+      const sMins = yToMins(clientY);
+      const dur = this.plugin.settings.defaultTaskDuration ?? 30;
+      const eMins = sMins + dur;
+      const topPx = minsToTop(sMins);
+
+      if (!guideLine) {
+        guideLine  = col.createDiv({ cls: "gcal-task-guide-line" });
+        guideLabel = col.createDiv({ cls: "gcal-task-guide-label" });
+        guideBlock = col.createDiv({ cls: "gcal-task-guide-block" });
+      }
+
+      guideLine.style.top  = `${topPx}px`;
+      guideLabel.style.top = `${topPx - 15}px`;
+
+      const sH = startHour + Math.floor(sMins / 60), sM = sMins % 60;
+      const eH = startHour + Math.floor(eMins / 60), eM = eMins % 60;
+      guideLabel.setText(`${fmt(sH, sM)} – ${fmt(eH, eM)}`);
+
+      guideBlock.style.top    = `${topPx}px`;
+      guideBlock.style.height = `${minsToTop(dur)}px`;
+    };
+
+    const hideGuide = () => {
+      guideLine?.remove();  guideLine  = null;
+      guideLabel?.remove(); guideLabel = null;
+      guideBlock?.remove(); guideBlock = null;
+    };
+
+    col.addEventListener("dragover", (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes("application/lightworx-task")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      showGuide(e.clientY);
+    });
+
+    col.addEventListener("dragleave", (e: DragEvent) => {
+      if (!col.contains(e.relatedTarget as Node)) hideGuide();
+    });
+
+    col.addEventListener("drop", async (e: DragEvent) => {
+      hideGuide();
+      const raw = e.dataTransfer?.getData("application/lightworx-task");
+      if (!raw) return;
+      e.preventDefault();
+
+      let task: any;
+      try { task = JSON.parse(raw); } catch { return; }
+
+      const dropMins = yToMins(e.clientY);
+      const duration = this.plugin.settings.defaultTaskDuration ?? 30;
+
+      const start = new Date(day);
+      start.setHours(startHour + Math.floor(dropMins / 60), dropMins % 60, 0, 0);
+      const end = new Date(start.getTime() + duration * 60 * 1000);
+
+      const defaultCalId =
+        this.plugin.settings.defaultCalendarId ||
+        this.plugin.settings.calendars.find((c) => c.enabled)?.id || "";
+
+      const tz = localTimeZone();
+      try {
+        const token = await this.getToken();
+        const created = await createEvent(token, defaultCalId, {
+          summary: task.title ?? "",
+          description: task.description ?? undefined,
+          start: { dateTime: start.toISOString(), timeZone: tz },
+          end:   { dateTime: end.toISOString(),   timeZone: tz },
+        });
+        new Notice(`Added "${task.title}" to calendar.`);
+        this.loadAndRender();
+      } catch (err: any) {
+        new Notice("Failed to create event: " + err.message);
+      }
+    });
   }
 
   // ── Drag-to-create ────────────────────────────────────────────────────────────
@@ -1522,6 +1623,20 @@ class GCalSettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    new Setting(containerEl)
+      .setName("Default Task Duration")
+      .setDesc("Duration in minutes when a task is dropped onto the calendar.")
+      .addSlider((sl) =>
+        sl
+          .setLimits(15, 120, 15)
+          .setValue(this.plugin.settings.defaultTaskDuration ?? 30)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.defaultTaskDuration = v;
+            await this.plugin.saveSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("Default View")
