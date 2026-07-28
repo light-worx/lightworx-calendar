@@ -46,7 +46,6 @@ interface GCalSettings {
   startHour: number;
   endHour: number;
   defaultCalendarId: string;
-  defaultTaskDuration: number;
 }
 
 const DEFAULT_SETTINGS: GCalSettings = {
@@ -60,7 +59,6 @@ const DEFAULT_SETTINGS: GCalSettings = {
   startHour: 6,
   endHour: 22,
   defaultCalendarId: "",
-  defaultTaskDuration: 30,
 };
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -447,7 +445,7 @@ class GCalView extends ItemView {
   }
 
   getViewType() { return VIEW_TYPE; }
-  getDisplayText() { return "Timeblock Planner"; }
+  getDisplayText() { return "GCal Timeblock"; }
   getIcon() { return "calendar-days"; }
 
   // FIX (startup cache): load cached events instantly, render them, then
@@ -503,7 +501,7 @@ class GCalView extends ItemView {
       });
       btn.onclick = () => {
         this.viewMode = v as "day" | "week";
-        this.renderView();
+        this.loadAndRender();
       };
     });
 
@@ -879,18 +877,17 @@ class GCalView extends ItemView {
       let startLbl: HTMLElement | null = null;
       let endLbl: HTMLElement | null = null;
 
-      const colStartHour = parseInt(col.dataset.startHour ?? "0");
       const durMs = event.end.dateTime && event.start.dateTime
         ? new Date(event.end.dateTime).getTime() - new Date(event.start.dateTime).getTime()
         : 60 * 60 * 1000;
       const durMins = durMs / 60000;
 
-      const snap = (clientY: number, targetCol: HTMLElement): number => {
+      const snapMins = (clientY: number, targetCol: HTMLElement): number => {
         const rect = targetCol.getBoundingClientRect();
         return Math.round(((clientY - rect.top) / HOUR_HEIGHT) * 60 / 15) * 15;
       };
 
-      const fmt = (h: number, m: number) => {
+      const fmtHM = (h: number, m: number) => {
         const ampm = h < 12 ? "AM" : "PM";
         return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${ampm}`;
       };
@@ -918,14 +915,14 @@ class GCalView extends ItemView {
           targetCol.appendChild(endLbl);
         }
         const sh = parseInt(targetCol.dataset.startHour ?? "0");
-        const sMins = snap(me.clientY, targetCol);
+        const sMins = snapMins(me.clientY, targetCol);
         const eMins = sMins + durMins;
         const topPx = (sMins / 60) * HOUR_HEIGHT;
         ghost.style.top = `${topPx}px`;
         startLbl.style.top = `${topPx - 14}px`;
         endLbl.style.top = `${topPx + height + 2}px`;
-        startLbl.setText(fmt(sh + Math.floor(sMins / 60), sMins % 60));
-        endLbl.setText(fmt(sh + Math.floor(eMins / 60), eMins % 60));
+        startLbl.setText(fmtHM(sh + Math.floor(sMins / 60), sMins % 60));
+        endLbl.setText(fmtHM(sh + Math.floor(eMins / 60), eMins % 60));
       };
 
       const onUp = async (me: MouseEvent) => {
@@ -944,9 +941,9 @@ class GCalView extends ItemView {
         const targetCol = this.colAtPoint(me.clientX, me.clientY) ?? col;
         const sh = parseInt(targetCol.dataset.startHour ?? "0");
         const dayIso = targetCol.dataset.day ?? dateKey(this.currentDate);
-        const sMins = snap(me.clientY, targetCol);
-        const [y, mo, d] = dayIso.split("-").map(Number);
-        const newStart = new Date(y, mo - 1, d, sh + Math.floor(sMins / 60), sMins % 60, 0, 0);
+        const sMins = snapMins(me.clientY, targetCol);
+        const [yr, mo, dy] = dayIso.split("-").map(Number);
+        const newStart = new Date(yr, mo - 1, dy, sh + Math.floor(sMins / 60), sMins % 60, 0, 0);
         const newEnd = new Date(newStart.getTime() + durMs);
         const tz = localTimeZone();
         try {
@@ -1056,7 +1053,6 @@ class GCalView extends ItemView {
     this.events = [...this.events, ev];
   }
 
-  // Re-render immediately with current this.events, then fetch fresh data silently.
   private async renderThenRefresh() {
     await this.renderView();
     this.silentRefresh().catch(console.warn);
@@ -1066,20 +1062,14 @@ class GCalView extends ItemView {
     try {
       const token = await this.getToken();
       const enabledCals = this.plugin.settings.calendars.filter((c) => c.enabled);
-      let timeMin: Date, timeMax: Date;
-      if (this.viewMode === "day") {
-        timeMin = new Date(this.currentDate);
-        timeMax = new Date(this.currentDate);
-        timeMax.setDate(timeMax.getDate() + 1);
-      } else {
-        timeMin = startOfWeek(this.currentDate);
-        timeMax = new Date(timeMin);
-        timeMax.setDate(timeMax.getDate() + 7);
-      }
+      const silentWeekStart = startOfWeek(this.currentDate);
+      const silentTimeMin = silentWeekStart;
+      const silentTimeMax = new Date(silentWeekStart);
+      silentTimeMax.setDate(silentTimeMax.getDate() + 7);
       const allEvents: GCalEvent[] = [];
       for (const cal of enabledCals) {
         try {
-          allEvents.push(...await fetchEvents(token, cal.id, cal.color, timeMin.toISOString(), timeMax.toISOString()));
+          allEvents.push(...await fetchEvents(token, cal.id, cal.color, silentTimeMin.toISOString(), silentTimeMax.toISOString()));
         } catch (err) { console.warn(`Failed to fetch ${cal.name}:`, err); }
       }
       this.events = allEvents;
@@ -1100,16 +1090,12 @@ class GCalView extends ItemView {
       const token = await this.getToken();
       const enabledCals = this.plugin.settings.calendars.filter((c) => c.enabled);
 
-      let timeMin: Date, timeMax: Date;
-      if (this.viewMode === "day") {
-        timeMin = new Date(this.currentDate);
-        timeMax = new Date(this.currentDate);
-        timeMax.setDate(timeMax.getDate() + 1);
-      } else {
-        timeMin = startOfWeek(this.currentDate);
-        timeMax = new Date(timeMin);
-        timeMax.setDate(timeMax.getDate() + 7);
-      }
+      // Always fetch the full week so switching between day/week view
+      // never shows a stale one-day cache in the week columns.
+      const fetchWeekStart = startOfWeek(this.currentDate);
+      const timeMin = fetchWeekStart;
+      const timeMax = new Date(fetchWeekStart);
+      timeMax.setDate(timeMax.getDate() + 7);
 
       const allEvents: GCalEvent[] = [];
       for (const cal of enabledCals) {
@@ -1146,12 +1132,9 @@ class GCalView extends ItemView {
   attachTaskDrop(col: HTMLElement, startHour: number, day: Date) {
     const yToMins = (clientY: number): number => {
       const rect = col.getBoundingClientRect();
-      const relY = clientY - rect.top;
-      return Math.round((relY / HOUR_HEIGHT) * 60 / 15) * 15;
+      return Math.round(((clientY - rect.top) / HOUR_HEIGHT) * 60 / 15) * 15;
     };
-
     const minsToTop = (mins: number) => (mins / 60) * HOUR_HEIGHT;
-
     const fmt = (h: number, m: number) => {
       const ampm = h < 12 ? "AM" : "PM";
       return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${ampm}`;
@@ -1166,20 +1149,16 @@ class GCalView extends ItemView {
       const dur = this.plugin.settings.defaultTaskDuration ?? 30;
       const eMins = sMins + dur;
       const topPx = minsToTop(sMins);
-
       if (!guideLine) {
         guideLine  = col.createDiv({ cls: "gcal-task-guide-line" });
         guideLabel = col.createDiv({ cls: "gcal-task-guide-label" });
         guideBlock = col.createDiv({ cls: "gcal-task-guide-block" });
       }
-
       guideLine.style.top  = `${topPx}px`;
       guideLabel.style.top = `${topPx - 15}px`;
-
       const sH = startHour + Math.floor(sMins / 60), sM = sMins % 60;
       const eH = startHour + Math.floor(eMins / 60), eM = eMins % 60;
       guideLabel.setText(`${fmt(sH, sM)} – ${fmt(eH, eM)}`);
-
       guideBlock.style.top    = `${topPx}px`;
       guideBlock.style.height = `${minsToTop(dur)}px`;
     };
@@ -1206,13 +1185,11 @@ class GCalView extends ItemView {
       const raw = e.dataTransfer?.getData("application/lightworx-task");
       if (!raw) return;
       e.preventDefault();
-
       let task: any;
       try { task = JSON.parse(raw); } catch { return; }
 
       const dropMins = yToMins(e.clientY);
       const duration = this.plugin.settings.defaultTaskDuration ?? 30;
-
       const start = new Date(day);
       start.setHours(startHour + Math.floor(dropMins / 60), dropMins % 60, 0, 0);
       const end = new Date(start.getTime() + duration * 60 * 1000);
@@ -1220,7 +1197,6 @@ class GCalView extends ItemView {
       const defaultCalId =
         this.plugin.settings.defaultCalendarId ||
         this.plugin.settings.calendars.find((c) => c.enabled)?.id || "";
-
       const tz = localTimeZone();
       try {
         const token = await this.getToken();
@@ -1368,8 +1344,8 @@ class GCalView extends ItemView {
                 const token = await this.getToken();
                 const created = await createEvent(token, calId, event);
                 new Notice("Event created.");
-                const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
-                this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+                const calColorFull = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+                this.addToCache({ ...created, calendarId: calId, calendarColor: calColorFull });
                 await this.renderThenRefresh();
               } catch (err: any) {
                 new Notice("Failed to create event: " + err.message);
@@ -1378,13 +1354,13 @@ class GCalView extends ItemView {
           } else {
             try {
               const token = await this.getToken();
-              const created = await createEvent(token, defaultCalId, {
+              const createdQuick = await createEvent(token, defaultCalId, {
                 summary: title,
                 start: { dateTime: start.toISOString(), timeZone: tz },
                 end: { dateTime: end.toISOString(), timeZone: tz },
               });
               new Notice("Event created.");
-              this.addToCache({ ...created, calendarId: defaultCalId, calendarColor: calColor });
+              this.addToCache({ ...createdQuick, calendarId: defaultCalId, calendarColor: calColor });
               await this.renderThenRefresh();
             } catch (err: any) {
               new Notice("Failed to create event: " + err.message);
@@ -1417,8 +1393,8 @@ class GCalView extends ItemView {
         const token = await this.getToken();
         const created = await createEvent(token, calId, event);
         new Notice("Event created.");
-        const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
-        this.addToCache({ ...created, calendarId: calId, calendarColor: calColor });
+        const newCalColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+        this.addToCache({ ...created, calendarId: calId, calendarColor: newCalColor });
         await this.renderThenRefresh();
       } catch (err: any) {
         new Notice("Failed to create event: " + err.message);
@@ -1441,9 +1417,9 @@ class GCalView extends ItemView {
             // Move to the new calendar first, then update content
             await moveEvent(token, event.calendarId, event.id, calId);
             await updateEvent(token, calId, event.id, updated);
-            const calColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
+            const movedColor = this.plugin.settings.calendars.find(c => c.id === calId)?.color || "#4285F4";
             this.removeFromCache(event.id, event.calendarId);
-            this.addToCache({ ...event, ...updated, id: event.id, calendarId: calId, calendarColor: calColor } as GCalEvent);
+            this.addToCache({ ...event, ...updated, id: event.id, calendarId: calId, calendarColor: movedColor } as GCalEvent);
           } else {
             await updateEvent(token, event.calendarId, event.id, updated);
             this.updateInCache(event.id, event.calendarId, updated);
@@ -1482,7 +1458,7 @@ class GCalSettingsTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Timeblock Planner Settings" });
+    containerEl.createEl("h2", { text: "GCal Timeblock Settings" });
 
     // OAuth setup guide
     const guide = containerEl.createEl("details", { cls: "gcal-settings-guide" });
@@ -1698,8 +1674,7 @@ class GCalSettingsTab extends PluginSettingTab {
       .setName("Default Task Duration")
       .setDesc("Duration in minutes when a task is dropped onto the calendar.")
       .addSlider((sl) =>
-        sl
-          .setLimits(15, 120, 15)
+        sl.setLimits(15, 120, 15)
           .setValue(this.plugin.settings.defaultTaskDuration ?? 30)
           .setDynamicTooltip()
           .onChange(async (v) => {
@@ -1761,13 +1736,13 @@ export default class GCalTimeblockPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GCalView(leaf, this));
 
-    this.addRibbonIcon("calendar-days", "Open Timeblock Planner", () => {
+    this.addRibbonIcon("calendar-days", "Open GCal Timeblock", () => {
       this.activateView();
     });
 
     this.addCommand({
       id: "open-gcal-timeblock",
-      name: "Open Timeblock Planner Panel",
+      name: "Open GCal Timeblock Panel",
       callback: () => this.activateView(),
     });
 
