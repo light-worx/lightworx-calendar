@@ -1,9 +1,9 @@
 {
 	"id": "lightworx-calendar",
-	"name": "Lightworx calendar",
-	"version": "0.3.8",
+	"name": "Timeblock planner",
+	"version": "0.3.9",
 	"minAppVersion": "0.15.0",
-	"description": "Lightworx calendar",
+	"description": "Lightworx timeblock planner",
 	"author": "Michael Bishop",
 	"authorUrl": "https://lightworx.co.za",
 	"isDesktopOnly": false
